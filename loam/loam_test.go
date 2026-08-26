@@ -6,7 +6,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 )
 
@@ -346,6 +346,53 @@ func TestColorizeRowsSupportsABlinkStyleSuffixMarkerViaAClosure(t *testing.T) {
 	}
 }
 
+func TestDrawHeaderBordersDoesNotCorruptADefaultBoldStyledHeader(t *testing.T) {
+	// table.DefaultStyles()'s Header style is Bold(true) by default, and
+	// neither canopy nor understory override it (only Selected) — so in
+	// real usage the header line already carries its own ANSI (per cell,
+	// wrapping that cell's own padding along with its title) before
+	// DrawHeaderBorders ever runs. A non-ANSI-aware byte-offset walk (an
+	// earlier version of this function used one, assuming the header was
+	// always plain text) mistakes an escape sequence's own printable
+	// bytes for real display columns and splices the border glyph into
+	// the middle of it — verified empirically as a literal "[1m" leaking
+	// into the visible header text the moment color was enabled. This
+	// reproduces that exact setup (forced color, default Header style,
+	// three columns so there are two internal borders to get wrong) and
+	// checks the *stripped* result is exactly the original with only the
+	// two border characters swapped — titles and everything else
+	// byte-for-byte untouched.
+	withForcedColor(t)
+	cols := []table.Column{{Title: "State", Width: 9}, {Title: "Since", Width: 6}, {Title: "Surface", Width: 9}}
+	tbl := newTable(cols, 1)
+	tbl.SetRows([]table.Row{{"idle", "12s", "VS Code"}})
+
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	before := strings.Split(tbl.View(), "\n")[0]
+	after := strings.Split(DrawHeaderBorders(tbl.View(), cols, style), "\n")[0]
+
+	if !strings.Contains(before, "\x1b") {
+		t.Fatalf("before = %q, want it to already carry ANSI (table.DefaultStyles()'s own Header Bold) — otherwise this test isn't exercising the bug at all", before)
+	}
+
+	wantRunes := []rune(ansi.Strip(before))
+	offsets := ColumnOffsets(cols)
+	for _, c := range []int{0, 1} {
+		border := offsets[c].Start + offsets[c].Width
+		wantRunes[border] = '│'
+	}
+	want := string(wantRunes)
+
+	if got := ansi.Strip(after); got != want {
+		t.Fatalf("stripped header = %q, want %q (Bold escape codes must not leak into visible text)", got, want)
+	}
+	for _, title := range []string{"State", "Since", "Surface"} {
+		if !strings.Contains(ansi.Strip(after), title) {
+			t.Fatalf("stripped header = %q, want it to still contain %q intact", ansi.Strip(after), title)
+		}
+	}
+}
+
 func TestDrawHeaderBordersMarksEveryInternalBorderOnTheHeaderLineOnly(t *testing.T) {
 	withForcedColor(t)
 	cols := []table.Column{{Title: "A", Width: 3}, {Title: "B", Width: 3}, {Title: "C", Width: 3}}
@@ -368,6 +415,7 @@ func TestDrawHeaderBordersMarksEveryInternalBorderOnTheHeaderLineOnly(t *testing
 }
 
 func TestDrawHeaderBordersPreservesDisplayWidthAndCellContent(t *testing.T) {
+	withForcedColor(t)
 	cols := []table.Column{{Title: "A", Width: 3}, {Title: "B", Width: 3}}
 	tbl := newTable(cols, 1)
 	tbl.SetRows([]table.Row{{"aaa", "bbb"}})
@@ -378,16 +426,16 @@ func TestDrawHeaderBordersPreservesDisplayWidthAndCellContent(t *testing.T) {
 	// BorderGlyph ("│", 3 UTF-8 bytes) replaces a single blank 1-byte pad
 	// space, so the byte length grows even though the *display* width —
 	// what actually has to keep matching bubbles/table's own column math
-	// — does not; runewidth.StringWidth, not len, is the right comparison
-	// here (the same distinction DisplayColumnToByteOffset's own doc
-	// makes).
-	if got, want := runewidth.StringWidth(after), runewidth.StringWidth(before); got != want {
+	// — does not; ansi.StringWidth (ANSI-aware, unlike runewidth.
+	// StringWidth) is the right comparison here, since before/after both
+	// carry the header's own default Bold ANSI in this forced-color test.
+	if got, want := ansi.StringWidth(after), ansi.StringWidth(before); got != want {
 		t.Fatalf("header line display width = %d, want %d unchanged (border glyph must occupy exactly the pad's own 1 column)", got, want)
 	}
 	if before == after {
 		t.Fatalf("header line unchanged; want the inter-column pad replaced with %q", BorderGlyph)
 	}
-	if !strings.Contains(after, "A") || !strings.Contains(after, "B") {
+	if !strings.Contains(ansi.Strip(after), "A") || !strings.Contains(ansi.Strip(after), "B") {
 		t.Fatalf("got %q, want both column titles still present", after)
 	}
 }
