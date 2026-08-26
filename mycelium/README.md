@@ -33,6 +33,15 @@ never-before-seen path: the already-open check finds the window
 `OpenVSCode` itself just created on every subsequent call, so nothing
 stacks up duplicate windows.
 
+If nothing is open on the exact path, but some other window already has
+a file focused somewhere *inside* it — e.g. a monorepo subpackage opened
+directly as its own window — that window is reused too, via each
+window's `AXDocument` accessibility attribute (the same one behind VS
+Code's title-bar proxy icon/breadcrumb), rather than opening a second,
+redundant window on the same tree. This only ever finds a match when
+some window actually has a file focused under that path; it fails
+closed, never wrongly claims a match.
+
 `mycelium.OpenGhostty` does the equivalent for a bare Ghostty tab,
 matching by working directory (Ghostty's `tty`/`pid` AppleScript
 properties don't reliably work as of Ghostty 1.3.1; working directory

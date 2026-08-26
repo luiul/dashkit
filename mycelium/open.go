@@ -3,6 +3,14 @@
 // without ever risking a duplicate window for a path that's already
 // open somewhere.
 //
+// OpenVSCode's "already open" check isn't limited to a window scoped to
+// the exact path either: if nothing is open there, but some other
+// window already has a file focused somewhere *inside* that path (e.g.
+// a monorepo subpackage opened directly as its own window), that window
+// is reused too rather than opening a redundant new one alongside it —
+// see matchVSCodeWindowNestedPath's doc for how and why that's a
+// best-effort second check, not a guarantee.
+//
 // This is the underground layer shared by canopy (jump to whichever
 // window is actually running a given agent) and understory (open or
 // focus a worktree on Enter): both need the exact same "is a window
@@ -30,8 +38,9 @@ type Result struct {
 type deps struct {
 	lookPathCode         func() (string, bool)
 	runCommand           func(args []string) (exitOK bool, stderr string)
-	windowTitles         func() ([]string, error)
+	vscodeWindows        func() ([]vscodeWindow, error)
 	matchWindowTitle     func(titles []string, path string) (string, bool)
+	matchNestedWindow    func(windows []vscodeWindow, path string) (string, bool)
 	raiseWindow          func(title string) (bool, error)
 	ghosttyFocusByCwd    func(cwd string) (bool, error)
 	ghosttyOpenNewWindow func(cwd string) error
@@ -50,8 +59,9 @@ func defaultDeps() deps {
 			err := cmd.Run()
 			return err == nil, strings.TrimSpace(stderr.String())
 		},
-		windowTitles:         vscodeWindowTitles,
+		vscodeWindows:        vscodeWindows,
 		matchWindowTitle:     matchVSCodeWindowTitle,
+		matchNestedWindow:    matchVSCodeWindowNestedPath,
 		raiseWindow:          vscodeRaiseWindow,
 		ghosttyFocusByCwd:    ghosttyFocusByCwd,
 		ghosttyOpenNewWindow: ghosttyOpenNewWindow,
@@ -74,6 +84,13 @@ func defaultDeps() deps {
 // repeatedly on the same never-before-seen path: the already-open check
 // finds the window OpenVSCode itself just created on every subsequent
 // call, so nothing stacks up duplicate windows.
+//
+// If no window is open on path itself, OpenVSCode also checks for one
+// open somewhere *inside* path (matchVSCodeWindowNestedPath) before
+// giving up and opening a new window there — e.g. pressing Enter on a
+// monorepo worktree's root reuses a window already open on one of its
+// subpackages, rather than opening a second, redundant window on the
+// same tree.
 func OpenVSCode(path string) Result {
 	return openVSCode(defaultDeps(), path)
 }
@@ -83,9 +100,20 @@ func openVSCode(d deps, path string) Result {
 		return Result{false, "No known path to open."}
 	}
 
-	titles, titlesErr := d.windowTitles()
-	if titlesErr == nil {
-		if title, ok := d.matchWindowTitle(titles, path); ok {
+	windows, windowsErr := d.vscodeWindows()
+	if windowsErr == nil {
+		titles := make([]string, len(windows))
+		for i, w := range windows {
+			titles[i] = w.Title
+		}
+		title, ok := d.matchWindowTitle(titles, path)
+		if !ok {
+			// Nothing open on path itself: check for a window already
+			// open somewhere inside it before falling all the way through
+			// to opening a brand-new one.
+			title, ok = d.matchNestedWindow(windows, path)
+		}
+		if ok {
 			if raised, raiseErr := d.raiseWindow(title); raiseErr == nil && raised {
 				return Result{true, "Focused VS Code window for " + path + "."}
 			}
@@ -96,7 +124,7 @@ func openVSCode(d deps, path string) Result {
 	}
 
 	if codeBin, ok := d.lookPathCode(); ok {
-		// titlesErr != nil means the already-open check itself couldn't
+		// windowsErr != nil means the already-open check itself couldn't
 		// run (VS Code scripting not permitted yet, most likely): fall
 		// back to the CLI's own best-effort --reuse-window rather than
 		// risking a duplicate window on every press. Otherwise the check
@@ -104,7 +132,7 @@ func openVSCode(d deps, path string) Result {
 		// already open — force a genuinely new one (-n) instead of
 		// letting --reuse-window guess wrong.
 		flag := "-n"
-		if titlesErr != nil {
+		if windowsErr != nil {
 			flag = "--reuse-window"
 		}
 		if exitOK, _ := d.runCommand([]string{codeBin, flag, path}); exitOK {

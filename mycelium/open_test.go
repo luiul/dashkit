@@ -15,8 +15,9 @@ func fakeDeps() deps {
 	return deps{
 		lookPathCode:         func() (string, bool) { return "/usr/local/bin/code", true },
 		runCommand:           func(args []string) (bool, string) { return true, "" },
-		windowTitles:         func() ([]string, error) { return nil, nil },
+		vscodeWindows:        func() ([]vscodeWindow, error) { return nil, nil },
 		matchWindowTitle:     func(titles []string, path string) (string, bool) { return "", false },
+		matchNestedWindow:    func(windows []vscodeWindow, path string) (string, bool) { return "", false },
 		raiseWindow:          func(title string) (bool, error) { return false, nil },
 		ghosttyFocusByCwd:    func(cwd string) (bool, error) { return false, nil },
 		ghosttyOpenNewWindow: func(cwd string) error { return nil },
@@ -38,7 +39,7 @@ func TestOpenVSCodeRaisesTheExistingWindowInsteadOfShellingOutToCode(t *testing.
 	// touch the `code` CLI at all (that's the whole point of checking
 	// first, instead of trusting `code --reuse-window` to guess right).
 	d := fakeDeps()
-	d.windowTitles = func() ([]string, error) { return []string{"dotfiles — main"}, nil }
+	d.vscodeWindows = func() ([]vscodeWindow, error) { return []vscodeWindow{{Title: "dotfiles — main"}}, nil }
 	d.matchWindowTitle = func(titles []string, path string) (string, bool) { return "dotfiles — main", true }
 	var raisedTitle string
 	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
@@ -58,9 +59,58 @@ func TestOpenVSCodeRaisesTheExistingWindowInsteadOfShellingOutToCode(t *testing.
 	}
 }
 
+func TestOpenVSCodeRaisesANestedWindowWhenNoneIsOpenOnTheExactPath(t *testing.T) {
+	// The new half: pressing Enter on a monorepo worktree's root should
+	// reuse a window already open on one of its subpackages, rather than
+	// opening a second, redundant window on the same tree — but only
+	// once matchWindowTitle has already ruled out a window open on the
+	// exact path itself.
+	d := fakeDeps()
+	d.matchWindowTitle = func(titles []string, path string) (string, bool) { return "", false }
+	d.matchNestedWindow = func(windows []vscodeWindow, path string) (string, bool) {
+		return "scm-analytics-engineers — deploy-full-cost", true
+	}
+	var raisedTitle string
+	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
+	codeCalled := false
+	d.runCommand = func(args []string) (bool, string) { codeCalled = true; return true, "" }
+
+	result := openVSCode(d, "/Users/x/tardis-community")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if raisedTitle != "scm-analytics-engineers — deploy-full-cost" {
+		t.Fatalf("got raised title %q, want the nested window's title", raisedTitle)
+	}
+	if codeCalled {
+		t.Fatalf("want the code CLI never invoked once a nested window was raised")
+	}
+}
+
+func TestOpenVSCodePrefersTheExactMatchOverANestedOne(t *testing.T) {
+	// A window open on the exact path always wins over one merely
+	// scoped somewhere inside it: matchNestedWindow should never even be
+	// consulted once matchWindowTitle already found a match.
+	d := fakeDeps()
+	d.matchWindowTitle = func(titles []string, path string) (string, bool) { return "tardis-community — main", true }
+	d.matchNestedWindow = func(windows []vscodeWindow, path string) (string, bool) {
+		t.Fatalf("want matchNestedWindow never called once the exact match already succeeded")
+		return "", false
+	}
+	var raisedTitle string
+	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
+
+	openVSCode(d, "/Users/x/tardis-community")
+
+	if raisedTitle != "tardis-community — main" {
+		t.Fatalf("got raised title %q, want the exact match's title", raisedTitle)
+	}
+}
+
 func TestOpenVSCodeForcesANewWindowWhenNoneIsAlreadyOpen(t *testing.T) {
 	// The case a path that's never been opened before always hits:
-	// windowTitles finds nothing, so OpenVSCode must force a genuinely
+	// vscodeWindows finds nothing, so OpenVSCode must force a genuinely
 	// new window (-n) rather than handing --reuse-window to the CLI and
 	// letting it fall back to hijacking some unrelated window.
 	d := fakeDeps()
@@ -84,13 +134,13 @@ func TestOpenVSCodeForcesANewWindowWhenNoneIsAlreadyOpen(t *testing.T) {
 }
 
 func TestOpenVSCodeForcesANewWindowWhenTheMatchedWindowIsGone(t *testing.T) {
-	// windowTitles can be stale: the matched window may have closed
+	// vscodeWindows can be stale: the matched window may have closed
 	// between that check and the raise attempt. raiseWindow reporting
 	// "not found" (false, nil) should fall through to opening fresh
 	// (still forced via -n, since the check itself did succeed), not
 	// report failure.
 	d := fakeDeps()
-	d.windowTitles = func() ([]string, error) { return []string{"dotfiles — main"}, nil }
+	d.vscodeWindows = func() ([]vscodeWindow, error) { return []vscodeWindow{{Title: "dotfiles — main"}}, nil }
 	d.matchWindowTitle = func(titles []string, path string) (string, bool) { return "dotfiles — main", true }
 	d.raiseWindow = func(title string) (bool, error) { return false, nil }
 	var gotArgs []string
@@ -113,14 +163,14 @@ func TestOpenVSCodeForcesANewWindowWhenTheMatchedWindowIsGone(t *testing.T) {
 }
 
 func TestOpenVSCodeFallsBackToReuseWindowWhenTheAlreadyOpenCheckItselfErrors(t *testing.T) {
-	// windowTitles erroring (e.g. the Automation permission for
+	// vscodeWindows erroring (e.g. the Automation permission for
 	// scripting VS Code hasn't been granted yet) means OpenVSCode
 	// genuinely doesn't know whether a window is already open. Falling
 	// back to --reuse-window here, rather than unconditionally forcing
 	// -n, keeps repeated presses on the same path from stacking up
 	// duplicate windows for anyone who hasn't granted that permission.
 	d := fakeDeps()
-	d.windowTitles = func() ([]string, error) { return nil, errors.New("not authorized") }
+	d.vscodeWindows = func() ([]vscodeWindow, error) { return nil, errors.New("not authorized") }
 	var gotArgs []string
 	d.runCommand = func(args []string) (bool, string) { gotArgs = args; return true, "" }
 
