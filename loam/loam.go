@@ -27,6 +27,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 )
 
@@ -148,24 +149,26 @@ const BorderGlyph = "│"
 // must be the exact columns the view was rendered with, in the same
 // order. Lines other than the header are returned unchanged.
 //
-// Header only, deliberately, for two reasons. First, bubbles/table's
-// default (no-border) layout leaves the 2-space gap between adjacent
-// cells as plain whitespace, so without this there was no visual cue at
-// all for where a mouse drag needs to land to grab a column border (see
-// the trellis package, which handles the drag itself) — and the header
-// is the only row a drag can ever start from (see trellis.Model.Handle's
-// own doc), so marking every data row too would add visual noise below
-// the one row that actually matters for this. Second, staying header-
-// only sidesteps a real hazard the rest of this package's own doc
-// already goes to some length to avoid: a data row may already carry
-// other ANSI (RecolorWord's per-word coloring, HighlightRow's selected-
-// row background), and go-runewidth — which DisplayColumnToByteOffset
-// relies on — counts a raw escape sequence's own printable bytes
-// ("38", ";", "5", "m", ...) as ordinary width-1 runes, not zero-width
-// control codes; walking such a line to find a display column would
-// silently misplace every border to its right. The header line never
-// carries any ANSI of its own in either dashboard, so no such walk is
-// needed here at all.
+// Header only, for the same reason ColorizeRows leaves line 0 alone
+// entirely (see its own doc): bubbles/table's default Header style is
+// Bold(true) (table.DefaultStyles()), so the header line normally
+// already carries ANSI of its own — per cell, wrapping that cell's own
+// 1-space padding along with its title — even when a caller never colors
+// anything else. That's exactly why this uses github.com/charmbracelet/
+// x/ansi's Cut rather than a naive byte-offset walk (an earlier version
+// of this function did exactly that, assuming the header was always
+// plain text, and silently spliced the border glyph into the middle of
+// the Bold escape sequence between two header cells the moment color
+// was enabled — corrupting the row instead of marking it, e.g. a
+// literal "[1m" appearing as text between two header titles). ansi.Cut
+// treats escape sequences as zero-width when measuring display columns,
+// so it finds the right character to replace regardless of how many
+// styled spans surround it. Every data row can *also* carry ANSI by the
+// time View() gets here (RecolorWord's per-word coloring, HighlightRow's
+// selected-row background) — marking those too would work the same way,
+// but the header is the only row a drag can ever start from (see
+// trellis.Model.Handle's own doc), so this stays limited to the one row
+// that actually matters for grabbing a border.
 func DrawHeaderBorders(view string, cols []table.Column, style lipgloss.Style) string {
 	if len(cols) < 2 {
 		return view
@@ -176,31 +179,22 @@ func DrawHeaderBorders(view string, cols []table.Column, style lipgloss.Style) s
 	}
 	offsets := ColumnOffsets(cols)
 	header := lines[0]
-	// Rightmost border first: inserting the glyph's own ANSI escape codes
-	// at an earlier border would otherwise shift the byte offset
-	// DisplayColumnToByteOffset computes for every border to its right
-	// (the same reason ColorizeRows processes its own WordColumns
-	// rightmost-first; see rightmostFirst's doc).
-	for c := len(cols) - 2; c >= 0; c-- {
+	width := ansi.StringWidth(header)
+	glyph := style.Render(BorderGlyph)
+	// Unlike RecolorWord's own rightmost-first ordering (needed because
+	// its byte-offset walk gets confused by earlier insertions), order
+	// doesn't matter here: ansi.Cut re-measures display columns from
+	// scratch each time and already skips escape sequences, so an earlier
+	// insertion's own ANSI never shifts where a later border lands.
+	for c := 0; c < len(cols)-1; c++ {
 		border := offsets[c].Start + offsets[c].Width
-		header = drawBorderAt(header, border, style)
+		if border < 0 || border >= width {
+			continue
+		}
+		header = ansi.Cut(header, 0, border) + glyph + ansi.Cut(header, border+1, width)
 	}
 	lines[0] = header
 	return strings.Join(lines, "\n")
-}
-
-// drawBorderAt replaces the single character at line's display column
-// col with BorderGlyph rendered in style. col always lands on
-// bubbles/table's own blank inter-cell padding, never real cell content
-// (ColumnOffsets' own doc: a column is always rendered at exactly its
-// Width, truncated with an ellipsis rather than overflowing into the pad
-// that follows it), so this only ever overwrites a plain space.
-func drawBorderAt(line string, col int, style lipgloss.Style) string {
-	off := DisplayColumnToByteOffset(line, col)
-	if off >= len(line) {
-		return line
-	}
-	return line[:off] + style.Render(BorderGlyph) + line[off+1:]
 }
 
 // ColOffset is a column's start position and width within a rendered
