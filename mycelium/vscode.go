@@ -74,10 +74,22 @@ end if
 	if err != nil {
 		return nil, err
 	}
-	if out == "" {
-		return nil, nil
+	return parseVSCodeWindowList(out), nil
+}
+
+// parseVSCodeWindowList parses vscodeWindows' raw AppleScript output: one
+// record per window, each "title\x1fdocumentURL", records themselves
+// separated by \x1e (see vscodeWindows' own script — ASCII characters 31
+// and 30). Split out from vscodeWindows so this part, unlike the
+// AppleScript call itself, is unit-testable without shelling out to
+// osascript. Tolerates the trailing \x1e every window (including the
+// last) leaves behind, and any trailing \r\n runOsascript's caller-side
+// TrimSpace didn't already strip from an individual record.
+func parseVSCodeWindowList(raw string) []vscodeWindow {
+	if raw == "" {
+		return nil
 	}
-	records := strings.Split(out, "\x1e")
+	records := strings.Split(raw, "\x1e")
 	windows := make([]vscodeWindow, 0, len(records))
 	for _, rec := range records {
 		rec = strings.TrimRight(rec, "\r\n")
@@ -87,7 +99,7 @@ end if
 		title, doc, _ := strings.Cut(rec, "\x1f")
 		windows = append(windows, vscodeWindow{Title: title, Path: fileURLToPath(doc)})
 	}
-	return windows, nil
+	return windows
 }
 
 // fileURLToPath converts a "file://..." URL (percent-encoded, as

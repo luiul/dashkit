@@ -110,3 +110,64 @@ func TestFileURLToPathIsEmptyForAnEmptyInput(t *testing.T) {
 		t.Fatalf("got %q, want empty", got)
 	}
 }
+
+func TestParseVSCodeWindowListParsesMultipleRecords(t *testing.T) {
+	raw := "understory — untruncate-branch\x1f\x1e" +
+		"scm-analytics-engineers — deploy-full-cost — README.md\x1ffile:///x/tardis-community/scm-analytics-engineers/README.md\x1e"
+	windows := parseVSCodeWindowList(raw)
+	if len(windows) != 2 {
+		t.Fatalf("got %d windows, want 2: %+v", len(windows), windows)
+	}
+	if windows[0] != (vscodeWindow{Title: "understory — untruncate-branch", Path: ""}) {
+		t.Fatalf("got %+v, want title-only window with no path", windows[0])
+	}
+	want := vscodeWindow{
+		Title: "scm-analytics-engineers — deploy-full-cost — README.md",
+		Path:  "/x/tardis-community/scm-analytics-engineers/README.md",
+	}
+	if windows[1] != want {
+		t.Fatalf("got %+v, want %+v", windows[1], want)
+	}
+}
+
+func TestParseVSCodeWindowListIgnoresTheTrailingRecordSeparatorEveryWindowLeavesBehind(t *testing.T) {
+	// The AppleScript always appends RS after every record, including the
+	// last one, so splitting on RS always leaves one trailing empty
+	// element that isn't a real window and must not become a bogus
+	// zero-value entry in the result.
+	windows := parseVSCodeWindowList("dotfiles — main\x1f\x1e")
+	if len(windows) != 1 {
+		t.Fatalf("got %d windows, want 1 (the trailing empty record must be dropped): %+v", len(windows), windows)
+	}
+}
+
+func TestParseVSCodeWindowListTrimsATrailingNewlineFromARecord(t *testing.T) {
+	// osascript can carry a trailing newline through on some runs;
+	// runOsascript's own TrimSpace only strips it from the very end of
+	// the whole output, not from an individual record if it ends up
+	// elsewhere, so parseVSCodeWindowList must handle it itself too.
+	windows := parseVSCodeWindowList("dotfiles — main\x1f\r\n\x1e")
+	if len(windows) != 1 || windows[0].Title != "dotfiles — main" {
+		t.Fatalf("got %+v, want a single window titled %q", windows, "dotfiles — main")
+	}
+}
+
+func TestParseVSCodeWindowListHandlesAWindowWithNoFieldSeparatorAtAll(t *testing.T) {
+	// strings.Cut's own "not found" case: a record with no \x1f in it at
+	// all (shouldn't happen given the AppleScript always emits one, but
+	// the parser shouldn't panic or misbehave if it ever does) is treated
+	// as a title with no path, not dropped.
+	windows := parseVSCodeWindowList("dotfiles — main\x1e")
+	if len(windows) != 1 || windows[0] != (vscodeWindow{Title: "dotfiles — main", Path: ""}) {
+		t.Fatalf("got %+v", windows)
+	}
+}
+
+func TestParseVSCodeWindowListIsEmptyForAnEmptyInput(t *testing.T) {
+	// The "" case vscodeWindows' own AppleScript returns when VS Code
+	// isn't running at all — must come back as no windows, not one bogus
+	// empty-titled entry.
+	if windows := parseVSCodeWindowList(""); windows != nil {
+		t.Fatalf("got %+v, want nil for an empty input", windows)
+	}
+}
