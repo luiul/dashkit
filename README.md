@@ -41,13 +41,17 @@ caller actually put in those columns.
   handle on), but once started keeps tracking the mouse regardless of
   which row it wanders into afterward — exactly like dragging a real
   window border.
-- **A `flex` column absorbs every change** — resizing any other column
-  takes width from (or gives it back to) whichever column you designate
-  as `flex`, so the table's total width never changes, only how it's
-  divided up. That's the same "whatever's left over" column
-  canopy/understory's own column-width functions already compute
-  (Location/Path respectively) — trellis just keeps it in sync with
-  whatever the user just dragged.
+- **Every border behaves the same way** — drag it, and the two columns
+  it sits between trade width between themselves; nothing else moves, so
+  the table's total width never changes no matter which border is
+  dragged. There's no dedicated "flex" column that silently absorbs
+  every other column's drag — an earlier version of this package worked
+  that way, but it meant one column's own border stopped responding to
+  a drag while every other border secretly resized that one distant
+  column instead of its actual neighbor. Which column (if any) fills
+  whatever's left over after a *terminal* resize is a separate policy
+  entirely, applied by the caller outside Handle (see each dashboard's
+  own resizeColumns/worktreeColumns).
 - **`mins`** — a floor per column below which a drag won't shrink it, so
   dragging never truncates a column's own title or its shortest realistic
   content out of legibility.
@@ -64,9 +68,8 @@ resizer := trellis.New()   // in your Model's own zero-value construction
 case tea.MouseMsg:
     cols := m.table.Columns()
     mins := []int{6, 6, 8, 8, 9, 20} // one per column, in the same order
-    flex := colPath                  // the column that fills whatever's left
     _, originY := m.renderHeader()   // however many lines precede the table
-    if widths, changed := m.resizer.Handle(msg, cols, mins, flex, 0, originY); changed {
+    if widths, changed := m.resizer.Handle(msg, cols, mins, 0, originY); changed {
         m.table.SetColumns(trellis.Apply(cols, widths))
     }
     return m, nil
@@ -82,11 +85,18 @@ p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 A resized column's width is a live UI decision, not model data: nothing
 here persists it to disk. If your own dashboard rebuilds columns from
 scratch on every poll or terminal resize (as both canopy and understory
-do — content-driven column widths, a `flex` column recomputed from
-whatever's left of the terminal width), keep the user's last resize
-around yourself (e.g. a `map[int]int` of column index → override width,
-in your own `Model`) and reapply it each time you rebuild columns, the
-same way both dashboards' own README documents.
+do — content-driven column widths, one column recomputed from whatever's
+left of the terminal width), keep the user's last resize around yourself
+(e.g. a `map[int]int` of column index → override width, in your own
+`Model`, recording *every* index in the widths Handle returned — a drag
+always changes two of them at once, not only the one at DragColumn()—
+see its own doc) and reapply it each time you rebuild columns, the same
+way both dashboards' own README documents.
+
+Users still need some way to *see* where a border actually is before they
+can grab it — see loam's `DrawHeaderBorders` below, which marks each of
+these same border positions with a visible divider on the table's header
+row.
 
 ## loam — row/column coloring and highlighting
 
@@ -140,6 +150,15 @@ text, and only the final display string gets colored.
   offset, so a multi-byte rune in an earlier column (a truncation
   ellipsis, or a genuinely unicode name) never misaligns a later
   column's recoloring.
+- **`DrawHeaderBorders`** — marks each internal column border with a
+  visible divider (`BorderGlyph`, "│") on the table's header row, so a
+  user actually has something to aim a mouse drag at (see trellis above)
+  instead of an invisible 2-space gap. Header-row-only, deliberately: a
+  data row may already carry other ANSI from `RecolorWord`/`HighlightRow`
+  (see the coloring hazard both of those already have to work around
+  above), where the header line never does in either dashboard — so
+  marking only the header sidesteps that hazard entirely rather than
+  needing its own ANSI-aware column walk.
 
 ### Usage
 
@@ -157,11 +176,13 @@ row := table.Row{
 	mergeStatusLabel(e),
 }
 
-// View: recolor Worktree/Merge, and highlight whichever row is tagged.
+// View: recolor Worktree/Merge, highlight whichever row is tagged, then
+// mark the header's own column borders so there's something to drag.
 view := loam.ColorizeRows(table.View(), table.Columns(), []loam.WordColumn{
 	{Index: colWorktree, Style: worktreeStatusStyle},
 	{Index: colMerge, Style: mergeStatusStyle},
 }, rowHighlightStyle)
+view = loam.DrawHeaderBorders(view, table.Columns(), subtleStyle)
 ```
 
 ## mycelium — open-or-focus a window

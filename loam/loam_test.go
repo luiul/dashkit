@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 )
 
@@ -342,5 +343,62 @@ func TestColorizeRowsSupportsABlinkStyleSuffixMarkerViaAClosure(t *testing.T) {
 	want := stateStyles["done"].Reverse(true).Render("done" + blinkMarker)
 	if !strings.Contains(got, want) {
 		t.Fatalf("got %q, want it to contain the reverse-video blink %q", got, want)
+	}
+}
+
+func TestDrawHeaderBordersMarksEveryInternalBorderOnTheHeaderLineOnly(t *testing.T) {
+	withForcedColor(t)
+	cols := []table.Column{{Title: "A", Width: 3}, {Title: "B", Width: 3}, {Title: "C", Width: 3}}
+	tbl := newTable(cols, 2)
+	tbl.SetRows([]table.Row{{"aaa", "bbb", "ccc"}})
+
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	got := DrawHeaderBorders(tbl.View(), cols, style)
+	lines := strings.Split(got, "\n")
+
+	wantGlyph := style.Render(BorderGlyph)
+	if n := strings.Count(lines[0], wantGlyph); n != 2 {
+		t.Fatalf("header line has %d styled border glyphs, want 2 (one per internal border): %q", n, lines[0])
+	}
+	for i, line := range lines[1:] {
+		if strings.Contains(line, BorderGlyph) {
+			t.Fatalf("data row %d contains %q, want only the header line marked: %q", i, BorderGlyph, line)
+		}
+	}
+}
+
+func TestDrawHeaderBordersPreservesDisplayWidthAndCellContent(t *testing.T) {
+	cols := []table.Column{{Title: "A", Width: 3}, {Title: "B", Width: 3}}
+	tbl := newTable(cols, 1)
+	tbl.SetRows([]table.Row{{"aaa", "bbb"}})
+
+	before := strings.Split(tbl.View(), "\n")[0]
+	after := strings.Split(DrawHeaderBorders(tbl.View(), cols, lipgloss.NewStyle()), "\n")[0]
+
+	// BorderGlyph ("│", 3 UTF-8 bytes) replaces a single blank 1-byte pad
+	// space, so the byte length grows even though the *display* width —
+	// what actually has to keep matching bubbles/table's own column math
+	// — does not; runewidth.StringWidth, not len, is the right comparison
+	// here (the same distinction DisplayColumnToByteOffset's own doc
+	// makes).
+	if got, want := runewidth.StringWidth(after), runewidth.StringWidth(before); got != want {
+		t.Fatalf("header line display width = %d, want %d unchanged (border glyph must occupy exactly the pad's own 1 column)", got, want)
+	}
+	if before == after {
+		t.Fatalf("header line unchanged; want the inter-column pad replaced with %q", BorderGlyph)
+	}
+	if !strings.Contains(after, "A") || !strings.Contains(after, "B") {
+		t.Fatalf("got %q, want both column titles still present", after)
+	}
+}
+
+func TestDrawHeaderBordersIsANoOpBelowTwoColumns(t *testing.T) {
+	cols := []table.Column{{Title: "A", Width: 3}}
+	tbl := newTable(cols, 1)
+	tbl.SetRows([]table.Row{{"aaa"}})
+
+	view := tbl.View()
+	if got := DrawHeaderBorders(view, cols, lipgloss.NewStyle()); got != view {
+		t.Fatalf("got %q, want the view unchanged (nothing to grab with only one column)", got)
 	}
 }

@@ -59,6 +59,15 @@ text, and only the final display string gets colored.
   offset, so a multi-byte rune in an earlier column (a truncation
   ellipsis, or a genuinely unicode name) never misaligns a later
   column's recoloring.
+- **`DrawHeaderBorders`** — marks each internal column border with a
+  visible divider (`BorderGlyph`, "│") on the table's header row, so a
+  user actually has something to aim a mouse drag at (see
+  [`trellis`](../trellis)) instead of an invisible 2-space gap.
+  Header-row-only, deliberately: a data row may already carry other ANSI
+  from `RecolorWord`/`HighlightRow` (see the coloring hazard both of
+  those already have to work around above), where the header line never
+  does in either dashboard — so marking only the header sidesteps that
+  hazard entirely rather than needing its own ANSI-aware column walk.
 
 ## Usage
 
@@ -76,11 +85,13 @@ row := table.Row{
 	mergeStatusLabel(e),
 }
 
-// View: recolor Worktree/Merge, and highlight whichever row is tagged.
+// View: recolor Worktree/Merge, highlight whichever row is tagged, then
+// mark the header's own column borders so there's something to drag.
 view := loam.ColorizeRows(table.View(), table.Columns(), []loam.WordColumn{
 	{Index: colWorktree, Style: worktreeStatusStyle},
 	{Index: colMerge, Style: mergeStatusStyle},
 }, rowHighlightStyle)
+view = loam.DrawHeaderBorders(view, table.Columns(), subtleStyle)
 ```
 
 ## Development

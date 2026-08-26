@@ -134,6 +134,75 @@ func rightmostFirst(wordCols []WordColumn) []WordColumn {
 	return ordered
 }
 
+// BorderGlyph is the vertical divider DrawHeaderBorders renders at each
+// internal column border. A thin box-drawing line (U+2502) rather than a
+// plain "|" (U+007C): most terminal fonts draw "|" with visible gaps
+// above and below at typical line heights, where "│" — the same glyph
+// most terminals already use to draw pane/box borders — reads as one
+// continuous line instead.
+const BorderGlyph = "│"
+
+// DrawHeaderBorders marks each internal column border — there are
+// len(cols)-1 of them — in the header line (line 0) of an already-
+// rendered bubbles/table view with BorderGlyph, rendered in style. cols
+// must be the exact columns the view was rendered with, in the same
+// order. Lines other than the header are returned unchanged.
+//
+// Header only, deliberately, for two reasons. First, bubbles/table's
+// default (no-border) layout leaves the 2-space gap between adjacent
+// cells as plain whitespace, so without this there was no visual cue at
+// all for where a mouse drag needs to land to grab a column border (see
+// the trellis package, which handles the drag itself) — and the header
+// is the only row a drag can ever start from (see trellis.Model.Handle's
+// own doc), so marking every data row too would add visual noise below
+// the one row that actually matters for this. Second, staying header-
+// only sidesteps a real hazard the rest of this package's own doc
+// already goes to some length to avoid: a data row may already carry
+// other ANSI (RecolorWord's per-word coloring, HighlightRow's selected-
+// row background), and go-runewidth — which DisplayColumnToByteOffset
+// relies on — counts a raw escape sequence's own printable bytes
+// ("38", ";", "5", "m", ...) as ordinary width-1 runes, not zero-width
+// control codes; walking such a line to find a display column would
+// silently misplace every border to its right. The header line never
+// carries any ANSI of its own in either dashboard, so no such walk is
+// needed here at all.
+func DrawHeaderBorders(view string, cols []table.Column, style lipgloss.Style) string {
+	if len(cols) < 2 {
+		return view
+	}
+	lines := strings.Split(view, "\n")
+	if len(lines) == 0 {
+		return view
+	}
+	offsets := ColumnOffsets(cols)
+	header := lines[0]
+	// Rightmost border first: inserting the glyph's own ANSI escape codes
+	// at an earlier border would otherwise shift the byte offset
+	// DisplayColumnToByteOffset computes for every border to its right
+	// (the same reason ColorizeRows processes its own WordColumns
+	// rightmost-first; see rightmostFirst's doc).
+	for c := len(cols) - 2; c >= 0; c-- {
+		border := offsets[c].Start + offsets[c].Width
+		header = drawBorderAt(header, border, style)
+	}
+	lines[0] = header
+	return strings.Join(lines, "\n")
+}
+
+// drawBorderAt replaces the single character at line's display column
+// col with BorderGlyph rendered in style. col always lands on
+// bubbles/table's own blank inter-cell padding, never real cell content
+// (ColumnOffsets' own doc: a column is always rendered at exactly its
+// Width, truncated with an ellipsis rather than overflowing into the pad
+// that follows it), so this only ever overwrites a plain space.
+func drawBorderAt(line string, col int, style lipgloss.Style) string {
+	off := DisplayColumnToByteOffset(line, col)
+	if off >= len(line) {
+		return line
+	}
+	return line[:off] + style.Render(BorderGlyph) + line[off+1:]
+}
+
 // ColOffset is a column's start position and width within a rendered
 // row line, accounting for bubbles/table's fixed 1-space padding on
 // both sides of every cell (table.DefaultStyles()'s Cell/Header

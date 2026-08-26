@@ -18,6 +18,26 @@
 // of it quietly drifting apart. It depends on loam for one thing only —
 // ColumnOffsets, so it doesn't need to re-derive bubbles/table's fixed
 // 1-space cell padding on its own — and is otherwise self-contained.
+//
+// Every border between two adjacent columns behaves identically: drag it
+// and those two columns trade width between themselves, nothing else
+// moves. An earlier version of this package instead routed every drag
+// through a single caller-designated "flex" column, on the idea that it
+// was the same "whatever's left over" column a caller's own terminal-
+// resize logic already computes — but that only reads as one border
+// among many when the flex column happens to be last (nothing to its
+// right, so it never has a border of its own to seem inconsistent
+// about). The moment a caller's flex column sits in the middle (more
+// columns to its right), that design meant *every* drag anywhere in the
+// table silently resized that one distant column instead of the two
+// columns actually straddling the border being dragged, and the flex
+// column's own right-hand border didn't respond to a drag at all — both
+// surprising, given every other border did respond, and both gone now
+// that a drag only ever touches its own two adjacent columns. A
+// terminal-resize-driven "give the leftover space to this one column"
+// policy is still entirely reasonable; it just isn't Handle's concern —
+// see each app's own resizeColumns/worktreeColumns for where that now
+// lives on its own, decoupled from mouse dragging entirely.
 package trellis
 
 import (
@@ -58,9 +78,13 @@ func (m Model) Dragging() bool {
 }
 
 // DragColumn returns the index of the column currently being resized, or
-// -1 if Dragging is false. Callers that persist a resized width as an
-// override (see canopy/understory's own colOverrides map) use this to
-// know which index the widths Handle just returned belongs to.
+// -1 if Dragging is false. A drag always changes exactly two adjacent
+// columns at once (DragColumn and DragColumn+1; see Handle's own doc),
+// so a caller that persists a resize as an override (see canopy/
+// understory's own colOverrides map) should record both of the widths
+// Handle just returned, not only the one at this index — DragColumn is
+// mostly useful for tests and diagnostics that only care which border
+// is currently being dragged.
 func (m Model) DragColumn() int {
 	return m.dragCol
 }
@@ -86,15 +110,21 @@ func (m Model) DragColumn() int {
 // mins gives each column's own minimum width, same length/order as cols
 // (use DefaultMinWidth for any column that doesn't need a more specific
 // one — e.g. one whose shortest possible content is longer than that).
-// flex is the index of the column that absorbs whatever a drag changes
-// elsewhere — the same "whatever's left over" column canopy/understory's
-// own column-width functions already compute (Location/Path
-// respectively) — so the table's own total width never changes no matter
-// which border moves; only how it's divided up does. flex's own
-// right-hand border, if it has one, is not grabbable: resizing flex
-// against itself would be a no-op by construction, since there'd be
-// nothing else for that specific drag to take width from or give it to.
-func (m *Model) Handle(msg tea.MouseMsg, cols []table.Column, mins []int, flex int, originX, originY int) ([]int, bool) {
+// Every internal border — there are len(cols)-1 of them — is grabbable
+// and, once dragged, trades width with exactly the one column next to
+// it: the column to the border's left widens by however much the column
+// to its right narrows, and vice versa. That keeps the table's own
+// total width unchanged no matter which border moves, the same
+// spreadsheet-or-file-manager behavior a column border always has,
+// without singling any one column out as a dedicated sink the way an
+// earlier version of this package did — see this package's own doc for
+// why that design didn't hold up once a caller's flex column wasn't
+// also its last one. Which column (if any) absorbs the *leftover* space
+// from a terminal resize is a separate policy entirely, applied by the
+// caller outside Handle (see each app's own resizeColumns/
+// worktreeColumns); Handle only ever moves width between two adjacent
+// columns in response to a drag.
+func (m *Model) Handle(msg tea.MouseMsg, cols []table.Column, mins []int, originX, originY int) ([]int, bool) {
 	widths := currentWidths(cols)
 
 	switch msg.Action {
@@ -109,7 +139,7 @@ func (m *Model) Handle(msg tea.MouseMsg, cols []table.Column, mins []int, flex i
 		if msg.Y != originY {
 			return widths, false
 		}
-		if i, ok := borderAt(cols, msg.X-originX, flex); ok {
+		if i, ok := borderAt(cols, msg.X-originX); ok {
 			m.dragCol = i
 			m.lastX = msg.X
 		}
@@ -132,7 +162,7 @@ func (m *Model) Handle(msg tea.MouseMsg, cols []table.Column, mins []int, flex i
 		if delta == 0 {
 			return widths, false
 		}
-		applied := applyDelta(widths, m.dragCol, flex, delta, mins)
+		applied := applyDelta(widths, m.dragCol, delta, mins)
 		m.lastX += applied
 		return widths, applied != 0
 	}
@@ -170,9 +200,11 @@ func currentWidths(cols []table.Column) []int {
 // borderAt returns the index of whichever column's right-hand border sits
 // within GrabWidth of x (the mouse's X position, already relative to the
 // table's own left edge), preferring the closest one if more than one
-// qualifies. flex's own border (if it has one — flex is usually the last
-// column, which has none) is excluded: see Handle's own doc for why.
-func borderAt(cols []table.Column, x, flex int) (int, bool) {
+// qualifies. Every column but the last has one (the last has nothing to
+// its right to trade width with), so every border in cols is grabbable
+// — there's no column singled out as ineligible any more; see Handle's
+// own doc for why.
+func borderAt(cols []table.Column, x int) (int, bool) {
 	if len(cols) < 2 {
 		return 0, false
 	}
@@ -181,9 +213,6 @@ func borderAt(cols []table.Column, x, flex int) (int, bool) {
 	best := -1
 	bestDist := GrabWidth + 1
 	for i := 0; i < len(cols)-1; i++ {
-		if i == flex {
-			continue
-		}
 		border := offsets[i].Start + offsets[i].Width
 		dist := x - border
 		if dist < 0 {
@@ -201,17 +230,20 @@ func borderAt(cols []table.Column, x, flex int) (int, bool) {
 }
 
 // applyDelta widens or narrows widths[dragCol] by delta, taking (or
-// giving back) exactly that much width from widths[flex] so their sum —
-// and therefore the table's total width — never changes. delta is
+// giving back) exactly that much width from its right-hand neighbor,
+// widths[dragCol+1] — always in range, since borderAt only ever returns
+// an index strictly less than len(widths)-1 — so their combined width,
+// and therefore the table's total width, never changes. delta is
 // clamped, in magnitude, to whichever side has less room to give before
-// hitting its own minimum (mins[dragCol] shrinking, mins[flex] growing),
-// and the actual (possibly clamped) delta applied is returned so the
-// caller's own drag-tracking (Model.lastX) stays in sync with what
-// really happened rather than what was requested.
-func applyDelta(widths []int, dragCol, flex, delta int, mins []int) int {
+// hitting its own minimum (mins[dragCol] shrinking, mins[dragCol+1]
+// growing), and the actual (possibly clamped) delta applied is returned
+// so the caller's own drag-tracking (Model.lastX) stays in sync with
+// what really happened rather than what was requested.
+func applyDelta(widths []int, dragCol, delta int, mins []int) int {
+	neighbor := dragCol + 1
 	switch {
 	case delta > 0:
-		if room := widths[flex] - minOf(mins, flex); delta > room {
+		if room := widths[neighbor] - minOf(mins, neighbor); delta > room {
 			delta = room
 		}
 	case delta < 0:
@@ -223,7 +255,7 @@ func applyDelta(widths []int, dragCol, flex, delta int, mins []int) int {
 		return 0
 	}
 	widths[dragCol] += delta
-	widths[flex] -= delta
+	widths[neighbor] -= delta
 	return delta
 }
 

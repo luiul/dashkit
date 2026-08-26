@@ -29,13 +29,17 @@ caller actually put in those columns.
   handle on), but once started keeps tracking the mouse regardless of
   which row it wanders into afterward — exactly like dragging a real
   window border.
-- **A `flex` column absorbs every change** — resizing any other column
-  takes width from (or gives it back to) whichever column you designate
-  as `flex`, so the table's total width never changes, only how it's
-  divided up. That's the same "whatever's left over" column
-  canopy/understory's own column-width functions already compute
-  (Location/Path respectively) — trellis just keeps it in sync with
-  whatever the user just dragged.
+- **Every border behaves the same way** — drag it, and the two columns
+  it sits between trade width between themselves; nothing else moves, so
+  the table's total width never changes no matter which border is
+  dragged. There's no dedicated "flex" column that silently absorbs
+  every other column's drag — an earlier version of this package worked
+  that way, but it meant one column's own border stopped responding to a
+  drag while every other border secretly resized that one distant column
+  instead of its actual neighbor. Which column (if any) fills whatever's
+  left over after a *terminal* resize is a separate policy entirely,
+  applied by the caller outside Handle (see each dashboard's own
+  resizeColumns/worktreeColumns).
 - **`mins`** — a floor per column below which a drag won't shrink it, so
   dragging never truncates a column's own title or its shortest realistic
   content out of legibility.
@@ -52,9 +56,8 @@ resizer := trellis.New()   // in your Model's own zero-value construction
 case tea.MouseMsg:
     cols := m.table.Columns()
     mins := []int{6, 6, 8, 8, 9, 20} // one per column, in the same order
-    flex := colPath                  // the column that fills whatever's left
     _, originY := m.renderHeader()   // however many lines precede the table
-    if widths, changed := m.resizer.Handle(msg, cols, mins, flex, 0, originY); changed {
+    if widths, changed := m.resizer.Handle(msg, cols, mins, 0, originY); changed {
         m.table.SetColumns(trellis.Apply(cols, widths))
     }
     return m, nil
@@ -70,11 +73,18 @@ p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 A resized column's width is a live UI decision, not model data: nothing
 here persists it to disk. If your own dashboard rebuilds columns from
 scratch on every poll or terminal resize (as both canopy and understory
-do — content-driven column widths, a `flex` column recomputed from
-whatever's left of the terminal width), keep the user's last resize
-around yourself (e.g. a `map[int]int` of column index → override width,
-in your own `Model`) and reapply it each time you rebuild columns, the
-same way both dashboards' own README documents.
+do — content-driven column widths, one column recomputed from whatever's
+left of the terminal width), keep the user's last resize around yourself
+(e.g. a `map[int]int` of column index → override width, in your own
+`Model`, recording *every* index in the widths Handle returned — a drag
+always changes two of them at once, not only the one at DragColumn() —
+see its own doc) and reapply it each time you rebuild columns, the same
+way both dashboards' own README documents.
+
+Users still need some way to *see* where a border actually is before
+they can grab it — see [`loam`](../loam)'s `DrawHeaderBorders`, which
+marks each of these same border positions with a visible divider on the
+table's header row.
 
 ## Development
 
