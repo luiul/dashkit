@@ -10,22 +10,21 @@
 // column widths in place, in response to a mouse drag, without needing to
 // know anything about what a caller actually put in those columns.
 //
-// This is a peer to github.com/luiul/loam (the row/column rendering
-// substrate both dashboards already share) and
-// github.com/luiul/mycelium (the open-or-focus-a-window logic both
-// dashboards' Enter key already shares): the same kind of small, focused
-// extraction, once two independent trees needed the identical behavior
-// rather than two copies of it quietly drifting apart. It depends on loam
-// for one thing only — ColumnOffsets, so it doesn't need to re-derive
-// bubbles/table's fixed 1-space cell padding on its own — and is
-// otherwise self-contained.
+// This is a peer to the loam package (the row/column rendering
+// substrate both dashboards already share) and the mycelium package
+// (the open-or-focus-a-window logic both dashboards' Enter key already
+// shares): the same kind of small, focused extraction, once two
+// independent trees needed the identical behavior rather than two copies
+// of it quietly drifting apart. It depends on loam for one thing only —
+// ColumnOffsets, so it doesn't need to re-derive bubbles/table's fixed
+// 1-space cell padding on its own — and is otherwise self-contained.
 package trellis
 
 import (
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/luiul/loam"
+	"github.com/luiul/dashkit/loam"
 )
 
 // GrabWidth is how many terminal columns on either side of a column
