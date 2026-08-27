@@ -9,7 +9,13 @@
 // a monorepo subpackage opened directly as its own window), that window
 // is reused too rather than opening a redundant new one alongside it —
 // see matchVSCodeWindowNestedPath's doc for how and why that's a
-// best-effort second check, not a guarantee.
+// best-effort second check, not a guarantee. Callers that know which
+// branch path is on (understory always does; see OpenVSCode's own doc)
+// get two stronger matches on top: windows are matched on rootName +
+// branch together, so same-named folders on different branches (the
+// main checkout vs. a branch worktree) stop being indistinguishable,
+// and a nested window with no file focused is still found by the branch
+// in its title (see matchVSCodeWindowBranch).
 //
 // This is the underground layer shared by canopy (jump to whichever
 // window is actually running a given agent) and understory (open or
@@ -39,8 +45,9 @@ type deps struct {
 	lookPathCode         func() (string, bool)
 	runCommand           func(args []string) (exitOK bool, stderr string)
 	vscodeWindows        func() ([]vscodeWindow, error)
-	matchWindowTitle     func(titles []string, path string) (string, bool)
+	matchWindowTitle     func(titles []string, path, branch string) (string, bool)
 	matchNestedWindow    func(windows []vscodeWindow, path string) (string, bool)
+	matchWindowBranch    func(titles []string, branch string) (string, bool)
 	raiseWindow          func(title string) (bool, error)
 	ghosttyFocusByCwd    func(cwd string) (bool, error)
 	ghosttyOpenNewWindow func(cwd string) error
@@ -62,6 +69,7 @@ func defaultDeps() deps {
 		vscodeWindows:        vscodeWindows,
 		matchWindowTitle:     matchVSCodeWindowTitle,
 		matchNestedWindow:    matchVSCodeWindowNestedPath,
+		matchWindowBranch:    matchVSCodeWindowBranch,
 		raiseWindow:          vscodeRaiseWindow,
 		ghosttyFocusByCwd:    ghosttyFocusByCwd,
 		ghosttyOpenNewWindow: ghosttyOpenNewWindow,
@@ -69,7 +77,16 @@ func defaultDeps() deps {
 }
 
 // OpenVSCode opens, or focuses if a window is already open on path, a VS
-// Code window there, using the real OS.
+// Code window there, using the real OS. branch is the branch path is
+// expected to be on, or "" when the caller doesn't know it (canopy,
+// passing a bare agent cwd): with a known branch, the window matching
+// below keys on rootName + branch together instead of on the folder
+// basename alone — this ecosystem's worktree layout gives every worktree
+// of a repo the same leaf folder name as the repo itself, so the
+// basename can never tell the main checkout apart from a branch
+// worktree, and a window open on a subpackage *inside* path with no file
+// focused is otherwise invisible to the nested-path check (see
+// matchVSCodeWindowBranch's doc).
 //
 // `code --reuse-window <path>` alone isn't enough to get real
 // switch-or-create behavior out of the `code` CLI: it only reuses the
@@ -86,16 +103,17 @@ func defaultDeps() deps {
 // call, so nothing stacks up duplicate windows.
 //
 // If no window is open on path itself, OpenVSCode also checks for one
-// open somewhere *inside* path (matchVSCodeWindowNestedPath) before
-// giving up and opening a new window there — e.g. pressing Enter on a
-// monorepo worktree's root reuses a window already open on one of its
-// subpackages, rather than opening a second, redundant window on the
-// same tree.
-func OpenVSCode(path string) Result {
-	return openVSCode(defaultDeps(), path)
+// open somewhere *inside* path before giving up and opening a new window
+// there — first by focused file (matchVSCodeWindowNestedPath), then by
+// the branch in the title (matchVSCodeWindowBranch) — e.g. pressing
+// Enter on a monorepo worktree's root reuses a window already open on
+// one of its subpackages, rather than opening a second, redundant window
+// on the same tree.
+func OpenVSCode(path, branch string) Result {
+	return openVSCode(defaultDeps(), path, branch)
 }
 
-func openVSCode(d deps, path string) Result {
+func openVSCode(d deps, path, branch string) Result {
 	if path == "" {
 		return Result{false, "No known path to open."}
 	}
@@ -106,12 +124,17 @@ func openVSCode(d deps, path string) Result {
 		for i, w := range windows {
 			titles[i] = w.Title
 		}
-		title, ok := d.matchWindowTitle(titles, path)
+		title, ok := d.matchWindowTitle(titles, path, branch)
 		if !ok {
-			// Nothing open on path itself: check for a window already
-			// open somewhere inside it before falling all the way through
-			// to opening a brand-new one.
+			// Nothing open on path itself: check for a window already open
+			// somewhere inside it — first by focused file, then, for a
+			// nested window with no file focused, by the branch in its
+			// title — before falling all the way through to opening a
+			// brand-new one.
 			title, ok = d.matchNestedWindow(windows, path)
+			if !ok {
+				title, ok = d.matchWindowBranch(titles, branch)
+			}
 		}
 		if ok {
 			if raised, raiseErr := d.raiseWindow(title); raiseErr == nil && raised {

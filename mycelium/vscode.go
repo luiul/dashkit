@@ -3,6 +3,7 @@ package mycelium
 import (
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -142,22 +143,92 @@ end tell
 	return out == "true", nil
 }
 
-// matchVSCodeWindowTitle finds the first title that's already showing
+// titleSeparator is what VS Code's `${separator}` template variable
+// renders between the non-empty parts of `window.title` — whitespace, a
+// dash-ish glyph (plain hyphen, en or em dash), whitespace — matched
+// tolerantly rather than pinned to the exact " — " the current setting
+// produces, the same tolerance the title matchers have always applied. A
+// rootName with dashes of its own ("scm-analytics-engineers") never trips
+// this: those dashes have no surrounding whitespace.
+var titleSeparator = regexp.MustCompile(`\s+[-–—]\s+`)
+
+// parseVSCodeTitle splits a VS Code window title back into the parts this
+// ecosystem's `window.title` template
+// ("${rootName}${separator}${activeRepositoryBranchName}${separator}${activeEditorShort}",
+// see matchVSCodeWindowTitle's doc) put into it: the workspace folder's
+// basename, and the branch that folder is on ("" when the title has no
+// branch component at all — a bare rootName, with neither a branch nor an
+// editor to show). Any third part (the active editor's filename) is
+// irrelevant to every matcher here and is dropped. A branch name
+// containing the separator itself would parse wrong, but branch names
+// with spaces aren't a thing in this ecosystem, so the split is safe in
+// practice.
+func parseVSCodeTitle(title string) (root, branch string) {
+	parts := titleSeparator.Split(title, 3)
+	root = parts[0]
+	if len(parts) > 1 {
+		branch = parts[1]
+	}
+	return root, branch
+}
+
+// matchVSCodeWindowTitle finds the title of the window already showing
 // path, going by this ecosystem's `window.title` convention (folder
-// basename first, then a separator and the branch, e.g.
-// "understory — main", or the plain basename on its own with nothing open
-// in it yet). A title matches when it equals the basename exactly, or
-// starts with the basename followed by a space: that's a real word
-// boundary (so "understory-lab — main" does NOT match a search for
-// "understory", since the character right after the shared prefix is
-// "-", not a space), tolerant of whatever separator glyph sits between
-// folder name and branch (em dash, plain hyphen, ...) without hardcoding
-// one. Weak key, same class of limitation as ghosttyFocusByCwd's own cwd
-// match: two different paths that happen to share a leaf folder name are
-// indistinguishable by title alone.
-func matchVSCodeWindowTitle(titles []string, path string) (string, bool) {
+// basename first, then the branch, then the active file, e.g.
+// "understory — main — main.go", or the plain basename on its own with
+// nothing open in it yet).
+//
+// branch is the branch path is expected to be on ("" when the caller
+// doesn't know it, e.g. canopy passing a bare agent cwd), and it matters:
+// this ecosystem's worktree layout gives every worktree of a repo the
+// same leaf folder name as the repo itself, so the basename alone can
+// never tell "tardis-community — main" (the main checkout) apart from
+// "tardis-community — patch/ISA-…" (a branch worktree) — two different
+// folders whose titles both start with the same word. With a known branch
+// the match is therefore strict: a title whose rootName matches but whose
+// branch component is a *different*, parseable branch is guaranteed to be
+// one of those same-named other folders (a worktree directory has exactly
+// one branch checked out) and is rejected, never focused. A title with no
+// branch component at all (a bare folder name) can't be ruled out the
+// same way and stays as a weak fallback, ranked below any full
+// rootName+branch match. The strictness deliberately couples matching to
+// this ecosystem's documented `window.title` grammar: a title whose
+// middle component isn't really the branch (a detached HEAD rendering,
+// a changed template) fails closed toward opening a new window.
+//
+// With branch == "" the behavior is the legacy basename match: a title
+// matches when it equals the basename exactly, or starts with the
+// basename followed by a space — a real word boundary (so
+// "understory-lab — main" does NOT match a search for "understory", since
+// the character right after the shared prefix is "-", not a space).
+// Weak key either way, same class of limitation as ghosttyFocusByCwd's
+// own cwd match: without a branch, two different paths that happen to
+// share a leaf folder name are indistinguishable by title alone.
+func matchVSCodeWindowTitle(titles []string, path, branch string) (string, bool) {
 	base := filepath.Base(path)
 	if base == "" {
+		return "", false
+	}
+	if branch != "" {
+		weak := ""
+		for _, title := range titles {
+			root, titleBranch := parseVSCodeTitle(title)
+			if root != base {
+				continue
+			}
+			if titleBranch == branch {
+				return title, true
+			}
+			// A different parseable branch means a different same-named
+			// folder (see this func's doc): skip it. Only a title with no
+			// branch component at all is kept, as the weak fallback.
+			if titleBranch == "" && weak == "" {
+				weak = title
+			}
+		}
+		if weak != "" {
+			return weak, true
+		}
 		return "", false
 	}
 	for _, title := range titles {
@@ -183,9 +254,11 @@ func matchVSCodeWindowTitle(titles []string, path string) (string, bool) {
 // the Explorer/Search panel or an empty editor group, with no file
 // currently focused, has Path == "" and looks indistinguishable from one
 // that was never opened on that path at all — see vscodeWindows' own doc
-// for why. It also only ever matches strictly *inside* path (Path must
-// have path + "/" as a prefix, not just share a string prefix), so e.g.
-// a window open on "/x/understory-lab" never matches a search for
+// for why. That case is exactly what matchVSCodeWindowBranch exists for
+// (it runs next, keying on the title's branch component instead). It
+// also only ever matches strictly *inside* path (Path must have path +
+// "/" as a prefix, not just share a string prefix), so e.g. a window
+// open on "/x/understory-lab" never matches a search for
 // "/x/understory", the same word-boundary care matchVSCodeWindowTitle
 // already takes for titles.
 func matchVSCodeWindowNestedPath(windows []vscodeWindow, path string) (string, bool) {
@@ -199,4 +272,49 @@ func matchVSCodeWindowNestedPath(windows []vscodeWindow, path string) (string, b
 		}
 	}
 	return "", false
+}
+
+// genericBranches are branch names too common across repos to key a
+// window match on: practically every repo has one checked out somewhere,
+// so a title carrying one says nothing about *which* repo's window it is.
+var genericBranches = map[string]bool{
+	"main":    true,
+	"master":  true,
+	"develop": true,
+	"trunk":   true,
+}
+
+// matchVSCodeWindowBranch finds a window by the branch component of its
+// title (see parseVSCodeTitle), regardless of which folder that window is
+// open on. This is the last-resort nested signal: a window open on a
+// subpackage *inside* path but with no file focused leaves
+// matchVSCodeWindowNestedPath nothing to work with (AXDocument tracks the
+// focused file, not the workspace folder — see vscodeWindows' doc), but
+// its title still carries the branch, and a branch is checked out in at
+// most one worktree of a repo at a time. So
+// "scm-analytics-engineers — patch/ISA-18409-…" identifies the window to
+// reuse even with no file open in it.
+//
+// Two guards keep this failing safe rather than wrong. Generic branch
+// names never match (see genericBranches). And the branch must be carried
+// by exactly one *distinct* title: two repos sharing a ticket-branch name
+// is a real possibility, and an ambiguous answer is worse than none — the
+// caller falls through to opening a new window rather than focusing an
+// arbitrary one. (Two windows with the *same* title are both a window
+// being looked for — e.g. a duplicate already open on the same folder —
+// so those do match.)
+func matchVSCodeWindowBranch(titles []string, branch string) (string, bool) {
+	if branch == "" || genericBranches[branch] {
+		return "", false
+	}
+	found := ""
+	for _, title := range titles {
+		if _, titleBranch := parseVSCodeTitle(title); titleBranch == branch {
+			if found != "" && found != title {
+				return "", false // ambiguous: two different windows claim this branch
+			}
+			found = title
+		}
+	}
+	return found, found != ""
 }

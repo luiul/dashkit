@@ -38,9 +38,30 @@ a file focused somewhere *inside* it — e.g. a monorepo subpackage opened
 directly as its own window — that window is reused too, via each
 window's `AXDocument` accessibility attribute (the same one behind VS
 Code's title-bar proxy icon/breadcrumb), rather than opening a second,
-redundant window on the same tree. This only ever finds a match when
-some window actually has a file focused under that path; it fails
-closed, never wrongly claims a match.
+redundant window on the same tree.
+
+Callers that know which branch the path is on (understory always does)
+can pass it along, and matching gets two upgrades on top of that:
+
+- **Windows are matched on folder name + branch together.** This
+  ecosystem's worktree layout gives every worktree of a repo the same
+  leaf folder name as the repo itself, so the basename alone can never
+  tell "tardis-community — main" (the main checkout) apart from
+  "tardis-community — patch/ISA-…" (a branch worktree). With a known
+  branch, a same-named window on a *different* branch is rejected rather
+  than focused.
+- **A nested window with no file focused is still found.** `AXDocument`
+  tracks the focused *file*, not the workspace folder, so a window
+  sitting on the Explorer or an empty editor group reports no path at
+  all. Its title still carries the branch, though
+  (`scm-analytics-engineers — patch/ISA-…`), and a branch is checked out
+  in at most one worktree of a repo at a time — so as a last resort
+  before opening a new window, a window is matched by the branch
+  component of its title alone. This fails safe on two guards: generic
+  branch names (`main`, `master`, `develop`, `trunk`) never match, and
+  the branch must be carried by exactly one distinct window title
+  (ambiguity falls through to opening a new window rather than focusing
+  an arbitrary one).
 
 `mycelium.OpenGhostty` does the equivalent for a bare Ghostty tab,
 matching by working directory (Ghostty's `tty`/`pid` AppleScript
@@ -50,9 +71,10 @@ does).
 ## Usage
 
 ```go
-import "github.com/luiul/mycelium"
+import "github.com/luiul/dashkit/mycelium"
 
-result := mycelium.OpenVSCode("/Users/you/code/some-repo")
+// Second argument is the branch the path is on, or "" when unknown.
+result := mycelium.OpenVSCode("/Users/you/code/some-repo", "main")
 // result.OK, result.Message
 
 result = mycelium.OpenGhostty("/Users/you/code/some-repo")

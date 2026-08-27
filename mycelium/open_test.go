@@ -16,8 +16,9 @@ func fakeDeps() deps {
 		lookPathCode:         func() (string, bool) { return "/usr/local/bin/code", true },
 		runCommand:           func(args []string) (bool, string) { return true, "" },
 		vscodeWindows:        func() ([]vscodeWindow, error) { return nil, nil },
-		matchWindowTitle:     func(titles []string, path string) (string, bool) { return "", false },
+		matchWindowTitle:     func(titles []string, path, branch string) (string, bool) { return "", false },
 		matchNestedWindow:    func(windows []vscodeWindow, path string) (string, bool) { return "", false },
+		matchWindowBranch:    func(titles []string, branch string) (string, bool) { return "", false },
 		raiseWindow:          func(title string) (bool, error) { return false, nil },
 		ghosttyFocusByCwd:    func(cwd string) (bool, error) { return false, nil },
 		ghosttyOpenNewWindow: func(cwd string) error { return nil },
@@ -40,13 +41,15 @@ func TestOpenVSCodeRaisesTheExistingWindowInsteadOfShellingOutToCode(t *testing.
 	// first, instead of trusting `code --reuse-window` to guess right).
 	d := fakeDeps()
 	d.vscodeWindows = func() ([]vscodeWindow, error) { return []vscodeWindow{{Title: "dotfiles — main"}}, nil }
-	d.matchWindowTitle = func(titles []string, path string) (string, bool) { return "dotfiles — main", true }
+	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) {
+		return "dotfiles — main", true
+	}
 	var raisedTitle string
 	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
 	codeCalled := false
 	d.runCommand = func(args []string) (bool, string) { codeCalled = true; return true, "" }
 
-	result := openVSCode(d, "/Users/x/dotfiles")
+	result := openVSCode(d, "/Users/x/dotfiles", "")
 
 	if !result.OK {
 		t.Fatalf("want ok, got %+v", result)
@@ -66,7 +69,7 @@ func TestOpenVSCodeRaisesANestedWindowWhenNoneIsOpenOnTheExactPath(t *testing.T)
 	// once matchWindowTitle has already ruled out a window open on the
 	// exact path itself.
 	d := fakeDeps()
-	d.matchWindowTitle = func(titles []string, path string) (string, bool) { return "", false }
+	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) { return "", false }
 	d.matchNestedWindow = func(windows []vscodeWindow, path string) (string, bool) {
 		return "scm-analytics-engineers — deploy-full-cost", true
 	}
@@ -75,7 +78,7 @@ func TestOpenVSCodeRaisesANestedWindowWhenNoneIsOpenOnTheExactPath(t *testing.T)
 	codeCalled := false
 	d.runCommand = func(args []string) (bool, string) { codeCalled = true; return true, "" }
 
-	result := openVSCode(d, "/Users/x/tardis-community")
+	result := openVSCode(d, "/Users/x/tardis-community", "")
 
 	if !result.OK {
 		t.Fatalf("want ok, got %+v", result)
@@ -88,12 +91,85 @@ func TestOpenVSCodeRaisesANestedWindowWhenNoneIsOpenOnTheExactPath(t *testing.T)
 	}
 }
 
+func TestOpenVSCodeRaisesAWindowMatchedByBranchAlone(t *testing.T) {
+	// The reported bug: a window open on a subpackage inside the
+	// worktree, with no file focused in it — invisible to both the exact
+	// title match and the AXDocument nested match, findable only by the
+	// branch in its title. That window must be raised, never a new one
+	// opened alongside it.
+	d := fakeDeps()
+	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) { return "", false }
+	d.matchNestedWindow = func(windows []vscodeWindow, path string) (string, bool) { return "", false }
+	d.matchWindowBranch = func(titles []string, branch string) (string, bool) {
+		if branch != "patch/ISA-18409" {
+			t.Fatalf("got branch %q, want it threaded through to the branch match", branch)
+		}
+		return "scm-analytics-engineers — patch/ISA-18409", true
+	}
+	var raisedTitle string
+	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
+	codeCalled := false
+	d.runCommand = func(args []string) (bool, string) { codeCalled = true; return true, "" }
+
+	result := openVSCode(d, "/Users/x/worktrees/x/tardis-community", "patch/ISA-18409")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if raisedTitle != "scm-analytics-engineers — patch/ISA-18409" {
+		t.Fatalf("got raised title %q, want the branch-matched window's title", raisedTitle)
+	}
+	if codeCalled {
+		t.Fatalf("want the code CLI never invoked once a branch-matched window was raised")
+	}
+}
+
+func TestOpenVSCodeThreadsTheBranchIntoTheExactTitleMatch(t *testing.T) {
+	d := fakeDeps()
+	var gotBranch string
+	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) {
+		gotBranch = branch
+		return "tardis-community — patch/ISA-18409", true
+	}
+	d.raiseWindow = func(title string) (bool, error) { return true, nil }
+
+	openVSCode(d, "/Users/x/worktrees/x/tardis-community", "patch/ISA-18409")
+
+	if gotBranch != "patch/ISA-18409" {
+		t.Fatalf("got branch %q passed to the title match, want %q", gotBranch, "patch/ISA-18409")
+	}
+}
+
+func TestOpenVSCodePrefersTheNestedPathMatchOverTheBranchMatch(t *testing.T) {
+	// A focused file inside path is path-proven; the branch in a title is
+	// inference. Inference never outranks proof.
+	d := fakeDeps()
+	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) { return "", false }
+	d.matchNestedWindow = func(windows []vscodeWindow, path string) (string, bool) {
+		return "scm-analytics-engineers — deploy-full-cost", true
+	}
+	d.matchWindowBranch = func(titles []string, branch string) (string, bool) {
+		t.Fatalf("want matchWindowBranch never called once the nested path match already succeeded")
+		return "", false
+	}
+	var raisedTitle string
+	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
+
+	openVSCode(d, "/Users/x/tardis-community", "deploy-full-cost")
+
+	if raisedTitle != "scm-analytics-engineers — deploy-full-cost" {
+		t.Fatalf("got raised title %q, want the nested path match's title", raisedTitle)
+	}
+}
+
 func TestOpenVSCodePrefersTheExactMatchOverANestedOne(t *testing.T) {
 	// A window open on the exact path always wins over one merely
 	// scoped somewhere inside it: matchNestedWindow should never even be
 	// consulted once matchWindowTitle already found a match.
 	d := fakeDeps()
-	d.matchWindowTitle = func(titles []string, path string) (string, bool) { return "tardis-community — main", true }
+	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) {
+		return "tardis-community — main", true
+	}
 	d.matchNestedWindow = func(windows []vscodeWindow, path string) (string, bool) {
 		t.Fatalf("want matchNestedWindow never called once the exact match already succeeded")
 		return "", false
@@ -101,7 +177,7 @@ func TestOpenVSCodePrefersTheExactMatchOverANestedOne(t *testing.T) {
 	var raisedTitle string
 	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
 
-	openVSCode(d, "/Users/x/tardis-community")
+	openVSCode(d, "/Users/x/tardis-community", "")
 
 	if raisedTitle != "tardis-community — main" {
 		t.Fatalf("got raised title %q, want the exact match's title", raisedTitle)
@@ -117,7 +193,7 @@ func TestOpenVSCodeForcesANewWindowWhenNoneIsAlreadyOpen(t *testing.T) {
 	var gotArgs []string
 	d.runCommand = func(args []string) (bool, string) { gotArgs = args; return true, "" }
 
-	result := openVSCode(d, "/Users/x/dotfiles")
+	result := openVSCode(d, "/Users/x/dotfiles", "")
 
 	if !result.OK {
 		t.Fatalf("want ok, got %+v", result)
@@ -141,12 +217,14 @@ func TestOpenVSCodeForcesANewWindowWhenTheMatchedWindowIsGone(t *testing.T) {
 	// report failure.
 	d := fakeDeps()
 	d.vscodeWindows = func() ([]vscodeWindow, error) { return []vscodeWindow{{Title: "dotfiles — main"}}, nil }
-	d.matchWindowTitle = func(titles []string, path string) (string, bool) { return "dotfiles — main", true }
+	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) {
+		return "dotfiles — main", true
+	}
 	d.raiseWindow = func(title string) (bool, error) { return false, nil }
 	var gotArgs []string
 	d.runCommand = func(args []string) (bool, string) { gotArgs = args; return true, "" }
 
-	result := openVSCode(d, "/Users/x/dotfiles")
+	result := openVSCode(d, "/Users/x/dotfiles", "")
 
 	if !result.OK {
 		t.Fatalf("want ok, got %+v", result)
@@ -174,7 +252,7 @@ func TestOpenVSCodeFallsBackToReuseWindowWhenTheAlreadyOpenCheckItselfErrors(t *
 	var gotArgs []string
 	d.runCommand = func(args []string) (bool, string) { gotArgs = args; return true, "" }
 
-	openVSCode(d, "/x")
+	openVSCode(d, "/x", "")
 
 	found := false
 	for _, a := range gotArgs {
@@ -196,7 +274,7 @@ func TestOpenVSCodeFallsBackToOpenWhenCodeCLIMissing(t *testing.T) {
 	var gotArgs []string
 	d.runCommand = func(args []string) (bool, string) { gotArgs = args; return true, "" }
 
-	result := openVSCode(d, "/Users/x/dotfiles")
+	result := openVSCode(d, "/Users/x/dotfiles", "")
 
 	if !result.OK {
 		t.Fatalf("want ok, got %+v", result)
@@ -213,7 +291,7 @@ func TestOpenVSCodeFallsBackToOpenWhenCodeCLIMissing(t *testing.T) {
 }
 
 func TestOpenVSCodeWithoutAPathFailsClearly(t *testing.T) {
-	result := openVSCode(fakeDeps(), "")
+	result := openVSCode(fakeDeps(), "", "")
 	if result.OK {
 		t.Fatalf("want not ok, got %+v", result)
 	}

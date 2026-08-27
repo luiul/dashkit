@@ -3,14 +3,14 @@ package mycelium
 import "testing"
 
 func TestMatchVSCodeWindowTitleMatchesTheBareFolderName(t *testing.T) {
-	title, ok := matchVSCodeWindowTitle([]string{"canopy — main", "understory"}, "/x/understory")
+	title, ok := matchVSCodeWindowTitle([]string{"canopy — main", "understory"}, "/x/understory", "")
 	if !ok || title != "understory" {
 		t.Fatalf("got (%q, %v), want (\"understory\", true)", title, ok)
 	}
 }
 
 func TestMatchVSCodeWindowTitleMatchesFolderNamePlusBranchSuffix(t *testing.T) {
-	title, ok := matchVSCodeWindowTitle([]string{"canopy — main", "dotfiles — implement-workmux"}, "/x/dotfiles")
+	title, ok := matchVSCodeWindowTitle([]string{"canopy — main", "dotfiles — implement-workmux"}, "/x/dotfiles", "")
 	if !ok || title != "dotfiles — implement-workmux" {
 		t.Fatalf("got (%q, %v), want (\"dotfiles — implement-workmux\", true)", title, ok)
 	}
@@ -19,23 +19,180 @@ func TestMatchVSCodeWindowTitleMatchesFolderNamePlusBranchSuffix(t *testing.T) {
 func TestMatchVSCodeWindowTitleDoesNotMatchAnUnrelatedLongerName(t *testing.T) {
 	// "understory-lab" must not match a search for "understory": the
 	// character right after the shared prefix isn't a word boundary.
-	_, ok := matchVSCodeWindowTitle([]string{"understory-lab — main"}, "/x/understory")
+	_, ok := matchVSCodeWindowTitle([]string{"understory-lab — main"}, "/x/understory", "")
 	if ok {
 		t.Fatalf("want no match, got one")
 	}
 }
 
 func TestMatchVSCodeWindowTitleNoMatchWhenNothingIsOpenForThatPath(t *testing.T) {
-	_, ok := matchVSCodeWindowTitle([]string{"canopy — main", "dotfiles — implement-workmux"}, "/x/understory")
+	_, ok := matchVSCodeWindowTitle([]string{"canopy — main", "dotfiles — implement-workmux"}, "/x/understory", "")
 	if ok {
 		t.Fatalf("want no match, got one")
 	}
 }
 
 func TestMatchVSCodeWindowTitleEmptyTitleListNeverMatches(t *testing.T) {
-	_, ok := matchVSCodeWindowTitle(nil, "/x/understory")
+	_, ok := matchVSCodeWindowTitle(nil, "/x/understory", "")
 	if ok {
 		t.Fatalf("want no match against an empty title list")
+	}
+}
+
+func TestMatchVSCodeWindowTitleWithBranchPrefersTheSameBranchWindow(t *testing.T) {
+	// This ecosystem's worktree layout gives every worktree of a repo the
+	// repo's own leaf folder name, so two open windows can both start with
+	// "tardis-community " while being different folders (the main checkout
+	// vs. a branch worktree): only the branch component tells them apart.
+	titles := []string{"tardis-community — main", "tardis-community — patch/ISA-18409"}
+	title, ok := matchVSCodeWindowTitle(titles, "/worktrees/x/tardis-community", "patch/ISA-18409")
+	if !ok || title != "tardis-community — patch/ISA-18409" {
+		t.Fatalf("got (%q, %v), want the branch worktree's window", title, ok)
+	}
+}
+
+func TestMatchVSCodeWindowTitleWithBranchRejectsASameNamedFolderOnAnotherBranch(t *testing.T) {
+	// The only window with a matching rootName is on a *different*
+	// branch, i.e. guaranteed a different folder sharing the leaf name —
+	// focusing it would be wrong, so the match must fail rather than fall
+	// back to it.
+	_, ok := matchVSCodeWindowTitle([]string{"tardis-community — main"}, "/worktrees/x/tardis-community", "patch/ISA-18409")
+	if ok {
+		t.Fatalf("want no match for a same-named window on a different branch")
+	}
+}
+
+func TestMatchVSCodeWindowTitleWithBranchKeepsABareTitleAsWeakFallback(t *testing.T) {
+	// A window titled with just the folder name (no branch component at
+	// all) can't be ruled out as a same-named other folder, so it still
+	// matches — but only once no rootName+branch match exists.
+	titles := []string{"understory"}
+	title, ok := matchVSCodeWindowTitle(titles, "/x/understory", "main")
+	if !ok || title != "understory" {
+		t.Fatalf("got (%q, %v), want the bare-title fallback", title, ok)
+	}
+}
+
+func TestMatchVSCodeWindowTitleWithBranchPrefersAFullMatchOverTheWeakFallback(t *testing.T) {
+	titles := []string{"understory", "understory — fix-cursor"}
+	title, ok := matchVSCodeWindowTitle(titles, "/x/understory", "fix-cursor")
+	if !ok || title != "understory — fix-cursor" {
+		t.Fatalf("got (%q, %v), want the rootName+branch match, not the bare title", title, ok)
+	}
+}
+
+func TestMatchVSCodeWindowTitleWithBranchStillRejectsAnUnrelatedLongerName(t *testing.T) {
+	// The word-boundary care of the legacy match must survive parsing:
+	// "understory-lab"'s rootName is not "understory", branch match or
+	// not.
+	_, ok := matchVSCodeWindowTitle([]string{"understory-lab — fix-cursor"}, "/x/understory", "fix-cursor")
+	if ok {
+		t.Fatalf("want no match for an unrelated longer folder name")
+	}
+}
+
+func TestMatchVSCodeWindowBranchFindsTheOneWindowCarryingTheBranch(t *testing.T) {
+	// The reported scenario: the window to reuse is open on a subpackage
+	// inside the worktree and has no file focused, so only its title's
+	// branch component can find it.
+	titles := []string{
+		"isa-analytics — sync-snow-bricks",
+		"understory — main — main.go",
+		"scm-analytics-engineers — patch/ISA-18409-fix-staticprice-satellite-replay-dups",
+	}
+	title, ok := matchVSCodeWindowBranch(titles, "patch/ISA-18409-fix-staticprice-satellite-replay-dups")
+	if !ok || title != "scm-analytics-engineers — patch/ISA-18409-fix-staticprice-satellite-replay-dups" {
+		t.Fatalf("got (%q, %v), want the nested subpackage window", title, ok)
+	}
+}
+
+func TestMatchVSCodeWindowBranchMatchesAcrossSeparatorAndFileParts(t *testing.T) {
+	// The same window with a file focused (title gains a third part) must
+	// still match: the branch is the middle component, not the suffix.
+	titles := []string{"scm-analytics-engineers — patch/ISA-18409 — README.md"}
+	title, ok := matchVSCodeWindowBranch(titles, "patch/ISA-18409")
+	if !ok || title != titles[0] {
+		t.Fatalf("got (%q, %v), want (%q, true)", title, ok, titles[0])
+	}
+}
+
+func TestMatchVSCodeWindowBranchNeverMatchesAGenericBranchName(t *testing.T) {
+	// Practically every repo has a main checked out somewhere, so a title
+	// carrying "main" says nothing about which repo's window it is.
+	for _, branch := range []string{"main", "master", "develop", "trunk"} {
+		if _, ok := matchVSCodeWindowBranch([]string{"other-repo — " + branch}, branch); ok {
+			t.Fatalf("want no match for generic branch %q", branch)
+		}
+	}
+}
+
+func TestMatchVSCodeWindowBranchNeverMatchesAnEmptyBranch(t *testing.T) {
+	if _, ok := matchVSCodeWindowBranch([]string{"understory — main"}, ""); ok {
+		t.Fatalf("want no match for an empty branch")
+	}
+}
+
+func TestMatchVSCodeWindowBranchIsAmbiguousAcrossTwoDifferentWindows(t *testing.T) {
+	// Two repos can share a ticket-branch name: two *different* titles
+	// carrying the branch is no answer at all, and the caller must fall
+	// through to opening a new window rather than focus an arbitrary one.
+	titles := []string{
+		"scm-analytics-engineers — patch/ISA-18409",
+		"other-repo — patch/ISA-18409",
+	}
+	if _, ok := matchVSCodeWindowBranch(titles, "patch/ISA-18409"); ok {
+		t.Fatalf("want no match when two different windows carry the branch")
+	}
+}
+
+func TestMatchVSCodeWindowBranchAllowsDuplicateWindowsOnTheSameTitle(t *testing.T) {
+	// Two windows with the *same* title are both the window being looked
+	// for (e.g. a duplicate already open on the same folder), so that's
+	// not ambiguity.
+	titles := []string{
+		"scm-analytics-engineers — patch/ISA-18409",
+		"scm-analytics-engineers — patch/ISA-18409",
+	}
+	title, ok := matchVSCodeWindowBranch(titles, "patch/ISA-18409")
+	if !ok || title != titles[0] {
+		t.Fatalf("got (%q, %v), want (%q, true)", title, ok, titles[0])
+	}
+}
+
+func TestParseVSCodeTitleSplitsAllThreeParts(t *testing.T) {
+	root, branch := parseVSCodeTitle("understory — main — main.go")
+	if root != "understory" || branch != "main" {
+		t.Fatalf("got (%q, %q), want (\"understory\", \"main\")", root, branch)
+	}
+}
+
+func TestParseVSCodeTitleSplitsRootAndBranchWithoutAnEditorPart(t *testing.T) {
+	root, branch := parseVSCodeTitle("scm-analytics-engineers — patch/ISA-18409")
+	if root != "scm-analytics-engineers" || branch != "patch/ISA-18409" {
+		t.Fatalf("got (%q, %q)", root, branch)
+	}
+}
+
+func TestParseVSCodeTitleToleratesAPlainHyphenSeparator(t *testing.T) {
+	root, branch := parseVSCodeTitle("understory - main")
+	if root != "understory" || branch != "main" {
+		t.Fatalf("got (%q, %q)", root, branch)
+	}
+}
+
+func TestParseVSCodeTitleKeepsDashesInsideTheRootName(t *testing.T) {
+	// Dashes without surrounding whitespace are part of the folder name,
+	// not separators.
+	root, branch := parseVSCodeTitle("scm-analytics-engineers — main")
+	if root != "scm-analytics-engineers" || branch != "main" {
+		t.Fatalf("got (%q, %q)", root, branch)
+	}
+}
+
+func TestParseVSCodeTitleReturnsABareTitleAsRootOnly(t *testing.T) {
+	root, branch := parseVSCodeTitle("understory")
+	if root != "understory" || branch != "" {
+		t.Fatalf("got (%q, %q), want (\"understory\", \"\")", root, branch)
 	}
 }
 
