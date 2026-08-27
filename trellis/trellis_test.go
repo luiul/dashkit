@@ -174,6 +174,64 @@ func TestHandleDragClampsAtItsRightNeighborsMinimum(t *testing.T) {
 	}
 }
 
+func TestHandleDragTowardANeighborAlreadyBelowItsMinimumIsANoOp(t *testing.T) {
+	// A caller's own layout pass can legitimately leave a column below
+	// its drag minimum (e.g. understory lets its Path column dip below
+	// minPathWidth on a terminal too narrow for everything else). That
+	// column has nothing to give: dragging its left-hand border toward
+	// it must be a no-op, NOT clamp the delta to the negative "room" and
+	// thereby invert the drag (widening the starved column by shrinking
+	// the dragged one — the exact regression this test pins down).
+	m := New()
+	cols := threeCols()
+	cols[2].Width = 6 // C sits below its own minimum of 10 already
+	mins := []int{0, 0, 10}
+	m.Handle(press(13, 0), cols, mins, 0, 0) // the B/C border
+
+	// Drag right, asking to widen B at C's expense: C has nothing to
+	// give, so nothing may move — least of all in the opposite direction.
+	widths, changed := m.Handle(motion(18, 0), cols, mins, 0, 0)
+	if changed {
+		t.Fatalf("changed = true (widths %v), want a no-op: C is already below its minimum", widths)
+	}
+	if got, want := widths[1], 5; got != want {
+		t.Fatalf("widths[1] = %d, want %d (unchanged)", got, want)
+	}
+	if got, want := widths[2], 6; got != want {
+		t.Fatalf("widths[2] = %d, want %d (unchanged)", got, want)
+	}
+}
+
+func TestHandleDragAwayFromANeighborBelowItsMinimumStillWorks(t *testing.T) {
+	// The mirror gesture: the dragged column itself is the one sitting
+	// below its minimum. Dragging it narrower still must not invert —
+	// but dragging it wider (away from the starved direction) works
+	// normally, taking from a neighbor that does have room.
+	m := New()
+	cols := threeCols()
+	cols[1].Width = 3 // B sits below its own minimum of 5 already; the B/C border sits at 8+3=11
+	mins := []int{0, 5, 0}
+	m.Handle(press(11, 0), cols, mins, 0, 0) // the B/C border
+
+	// Drag left, asking to shrink B further: no room, no-op.
+	widths, changed := m.Handle(motion(10, 0), cols, mins, 0, 0)
+	if changed {
+		t.Fatalf("changed = true (widths %v), want a no-op: B is already below its minimum", widths)
+	}
+
+	// Drag right: B widens at C's expense, as usual (C has 7 to give).
+	widths, changed = m.Handle(motion(17, 0), cols, mins, 0, 0)
+	if !changed {
+		t.Fatalf("changed = false, want true (C has room to give)")
+	}
+	if got, want := widths[1], 9; got != want {
+		t.Fatalf("widths[1] = %d, want %d (B widened by the drag)", got, want)
+	}
+	if got, want := widths[2], 4; got != want {
+		t.Fatalf("widths[2] = %d, want %d (C gave up what B gained)", got, want)
+	}
+}
+
 func TestHandleDragAccumulatesAcrossMultipleMotionEvents(t *testing.T) {
 	m := New()
 	cols := threeCols()

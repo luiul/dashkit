@@ -239,15 +239,25 @@ func borderAt(cols []table.Column, x int) (int, bool) {
 // growing), and the actual (possibly clamped) delta applied is returned
 // so the caller's own drag-tracking (Model.lastX) stays in sync with
 // what really happened rather than what was requested.
+//
+// Room is clamped at zero, never negative: a caller's own layout pass
+// may legitimately have a column sitting below its drag minimum already
+// (e.g. understory's worktreeColumns lets Path dip below minPathWidth
+// on a terminal too narrow for everything else — the column has nothing
+// left to give). Without the floor, widths[neighbor]-mins[neighbor]
+// comes out negative there, and clamping delta to that negative "room"
+// would INVERT the drag: dragging right to widen a column would shrink
+// it (and fatten its already-starved neighbor) instead of doing
+// nothing.
 func applyDelta(widths []int, dragCol, delta int, mins []int) int {
 	neighbor := dragCol + 1
 	switch {
 	case delta > 0:
-		if room := widths[neighbor] - minOf(mins, neighbor); delta > room {
+		if room := max(widths[neighbor]-minOf(mins, neighbor), 0); delta > room {
 			delta = room
 		}
 	case delta < 0:
-		if room := widths[dragCol] - minOf(mins, dragCol); -delta > room {
+		if room := max(widths[dragCol]-minOf(mins, dragCol), 0); -delta > room {
 			delta = -room
 		}
 	}
