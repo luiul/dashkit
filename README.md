@@ -9,6 +9,10 @@ coloring/highlighting, open-or-focus-a-window on Enter, the destructive-
 action confirmation modal), so those live here once instead of being
 written twice and quietly drifting apart in each tree.
 
+[CONVENTIONS.md](CONVENTIONS.md) states the keybinding, confirmation-modal,
+phrasing, rendering, testing, and releasing conventions all three repos
+follow: the decisions behind the packages below, written down once.
+
 Each package below is self-contained and independently importable:
 
 ```go
