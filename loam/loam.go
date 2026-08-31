@@ -296,3 +296,37 @@ func StyleSequences(style lipgloss.Style) (open, closeSeq string) {
 	}
 	return rendered[:idx], rendered[idx+1:]
 }
+
+// HelpBinding is one row of a keybinding help overlay: the key(s), and
+// what they do.
+type HelpBinding struct {
+	Key, Desc string
+}
+
+// HelpView renders a keybinding overlay's body: the title on its own
+// line, then one "  key  desc" line per binding with the key column
+// padded to the widest key. Padding is runewidth-aware (display width,
+// not byte length), so multi-byte key glyphs like "↑/↓" don't skew the
+// description column — a len()-based pad would miscount exactly those
+// rows.
+//
+// This is the whole of the "?" overlay's list rendering for both canopy
+// and understory, extracted so the two dashboards' overlays cannot drift
+// apart again (same layout, same padding math); each app keeps only its
+// own binding table, the title it passes, and the surrounding
+// header/footer composition.
+func HelpView(title string, bindings []HelpBinding, titleStyle, descStyle lipgloss.Style) string {
+	width := 0
+	for _, b := range bindings {
+		if w := runewidth.StringWidth(b.Key); w > width {
+			width = w
+		}
+	}
+	lines := make([]string, 0, len(bindings)+1)
+	lines = append(lines, titleStyle.Render(title))
+	for _, b := range bindings {
+		pad := strings.Repeat(" ", width-runewidth.StringWidth(b.Key))
+		lines = append(lines, "  "+b.Key+pad+"  "+descStyle.Render(b.Desc))
+	}
+	return strings.Join(lines, "\n")
+}

@@ -5,9 +5,9 @@ Shared Go helper packages for [canopy](https://github.com/luiul/canopy)
 (git-worktree dashboard) — the two terminal dashboards that grow this
 kit. Both are Bubble Tea apps built around a `bubbles/table`, both need
 the exact same handful of things from it (mouse column-resize, row
-coloring/highlighting, open-or-focus-a-window on Enter), so those live
-here once instead of being written twice and quietly drifting apart in
-each tree.
+coloring/highlighting, open-or-focus-a-window on Enter, the destructive-
+action confirmation modal), so those live here once instead of being
+written twice and quietly drifting apart in each tree.
 
 Each package below is self-contained and independently importable:
 
@@ -16,6 +16,7 @@ import (
 	"github.com/luiul/dashkit/trellis"
 	"github.com/luiul/dashkit/loam"
 	"github.com/luiul/dashkit/mycelium"
+	"github.com/luiul/dashkit/confirm"
 )
 ```
 
@@ -244,6 +245,36 @@ to be shown straight to a user (e.g. as a TUI notification) — callers
 don't need to inspect the error types themselves unless they want to
 branch on them.
 
+## confirm — the destructive-action confirmation modal
+
+The shared state machine behind both dashboards' confirmation prompts
+(understory's `x/X/P/M` worktree removal, canopy's `x/X/D` session
+signaling): one answer discipline, one auto-cancel timeout, one
+poll-revalidation hook, so the two modals cannot drift apart.
+
+Unlike the other packages, the name is plainly descriptive rather than a
+garden metaphor: the package is exactly what it says.
+
+### What it does
+
+- **`Classify`** — the one answer set, in one place: `y` confirms; `n`,
+  `esc`, or `enter` cancel (honoring the prompt's `[y/N]`); every other
+  key is swallowed; `ctrl+c` quits, as it does from everywhere.
+- **`State[T]`** — the modal half of a prompt: the armed payload (the
+  caller's own type: a worktree batch, a process list) plus the token
+  its auto-cancel tick must match. `Arm` opens and schedules the tick,
+  `Resolve` closes and invalidates it, `Tick` fires the timeout only for
+  the prompt it was scheduled for.
+- **`Timeout` + `TimeoutText`** — an unanswered prompt cancels itself
+  after 10s, with both apps showing the same notification text.
+- **`Refresh`** — the poll-revalidation hook: re-stamps an armed
+  prompt's targets against each fresh poll, dropping the ones that
+  vanished in the meantime, so a prompt never fires at rows that no
+  longer mean what the user thought.
+
+See [confirm/README.md](confirm/README.md) for the full discipline and a
+usage walkthrough.
+
 ## Development
 
 ```bash
@@ -262,7 +293,10 @@ under its own subdirectory) once it became clear all three existed for
 the same single reason — shared dashboard behavior with exactly two
 consumers — and were paying triple the go.mod/go.sum/README/LICENSE/tag
 overhead for it. The three original repos are archived; see each for
-their pre-merge history.
+their pre-merge history. `confirm` joined later, born here, when the two
+dashboards' confirmation modals were aligned on one discipline (see
+[understory#4](https://github.com/luiul/understory/issues/4)) and the
+machinery was extracted so they cannot drift again.
 
 ## License
 

@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 )
 
@@ -448,5 +449,56 @@ func TestDrawHeaderBordersIsANoOpBelowTwoColumns(t *testing.T) {
 	view := tbl.View()
 	if got := DrawHeaderBorders(view, cols, lipgloss.NewStyle()); got != view {
 		t.Fatalf("got %q, want the view unchanged (nothing to grab with only one column)", got)
+	}
+}
+
+func TestHelpViewPadsTheKeyColumnByDisplayWidth(t *testing.T) {
+	bindings := []HelpBinding{
+		{"↑/↓, k/j", "move the selection"},
+		{"q, ctrl+c", "quit"},
+	}
+
+	got := HelpView("keybindings", bindings, lipgloss.NewStyle(), lipgloss.NewStyle())
+
+	lines := strings.Split(got, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("got %d lines (%q), want title + 2 bindings", len(lines), got)
+	}
+	if lines[0] != "keybindings" {
+		t.Fatalf("got title %q, want %q", lines[0], "keybindings")
+	}
+	// "↑/↓, k/j" is 9 display columns but 13 bytes: a len()-based pad
+	// would under-pad exactly this row and skew the description column.
+	// Both descriptions must start at the same display column.
+	descCol := func(line string) int {
+		idx := strings.Index(line, "  ") // first double space after the key
+		if idx < 0 {
+			t.Fatalf("got %q, want a padded key column", line)
+		}
+		return runewidth.StringWidth(line[:idx]) + 2
+	}
+	if a, b := descCol(lines[1]), descCol(lines[2]); a != b {
+		t.Fatalf("description columns %d and %d, want them aligned:\n%s", a, b, got)
+	}
+	for i, b := range bindings {
+		if !strings.Contains(lines[i+1], b.Key) || !strings.Contains(lines[i+1], b.Desc) {
+			t.Fatalf("line %d = %q, want it to contain %q and %q", i+1, lines[i+1], b.Key, b.Desc)
+		}
+	}
+}
+
+func TestHelpViewRendersTheStylesItIsGiven(t *testing.T) {
+	withForcedColor(t)
+	bindings := []HelpBinding{{"q", "quit"}}
+	title := lipgloss.NewStyle().Bold(true)
+	desc := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+
+	got := HelpView("keybindings", bindings, title, desc)
+
+	if !strings.Contains(got, title.Render("keybindings")) {
+		t.Fatalf("got %q, want the title rendered in titleStyle", got)
+	}
+	if !strings.Contains(got, desc.Render("quit")) {
+		t.Fatalf("got %q, want the description rendered in descStyle", got)
 	}
 }

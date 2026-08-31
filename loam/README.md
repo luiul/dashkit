@@ -68,6 +68,14 @@ text, and only the final display string gets colored.
   those already have to work around above), where the header line never
   does in either dashboard — so marking only the header sidesteps that
   hazard entirely rather than needing its own ANSI-aware column walk.
+- **`HelpBinding` + `HelpView`** — render a keybinding overlay's body
+  (the "?" key's full binding list): the title on its own line, then one
+  `key  desc` line per binding with the key column padded to the widest
+  key. Padding is runewidth-aware (display width, not byte length), so
+  multi-byte key glyphs like `↑/↓` don't skew the description column.
+  Both dashboards render their overlays through this one function, so
+  the two cannot drift apart; each app keeps only its own binding table
+  and the surrounding header/footer composition.
 
 ## Usage
 
