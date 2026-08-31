@@ -87,13 +87,16 @@ type State[T any] struct {
 	token   int
 }
 
-// Active reports whether a prompt is currently armed.
-func (s *State[T]) Active() bool { return s.Payload != nil }
+// Active reports whether a prompt is currently armed. A value receiver,
+// like Token's: bubbletea models are passed around by value (and type
+// assertions back out of tea.Model produce non-addressable copies), so
+// the read-only methods must work on a plain copy.
+func (s State[T]) Active() bool { return s.Payload != nil }
 
 // Token exposes the current auto-cancel token, primarily so tests can
 // construct matching (or deliberately stale) Msg values without waiting
 // out the real Timeout.
-func (s *State[T]) Token() int { return s.token }
+func (s State[T]) Token() int { return s.token }
 
 // Arm opens the prompt with payload and returns the auto-cancel tick
 // command. Arming while a prompt is already open replaces it; callers
