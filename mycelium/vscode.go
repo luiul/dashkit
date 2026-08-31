@@ -243,31 +243,62 @@ func matchVSCodeWindowTitle(titles []string, path, branch string) (string, bool)
 }
 
 // matchVSCodeWindowNestedPath finds a window whose currently active file
-// (vscodeWindow.Path, from AXDocument) lives inside path — e.g. path is
-// a monorepo worktree's root and some other window already has one of
-// its subpackages open directly, with a file focused there. This is
-// meant to run only once matchVSCodeWindowTitle has already ruled out a
-// window open on path itself: a window scoped to the exact folder is
-// always preferred over reusing one merely scoped somewhere inside it.
+// (vscodeWindow.Path, from AXDocument) lives inside path's git work tree
+// — e.g. path is a monorepo worktree's root and some other window already
+// has one of its subpackages open directly, with a file focused there.
+// This is meant to run only once matchVSCodeWindowTitle has already ruled
+// out a window open on path itself: a window scoped to the exact folder
+// is always preferred over reusing one merely scoped somewhere inside it.
 //
-// This fails closed, never wrongly claims a match: a window sitting on
-// the Explorer/Search panel or an empty editor group, with no file
-// currently focused, has Path == "" and looks indistinguishable from one
-// that was never opened on that path at all — see vscodeWindows' own doc
-// for why. That case is exactly what matchVSCodeWindowBranch exists for
-// (it runs next, keying on the title's branch component instead). It
-// also only ever matches strictly *inside* path (Path must have path +
-// "/" as a prefix, not just share a string prefix), so e.g. a window
-// open on "/x/understory-lab" never matches a search for
-// "/x/understory", the same word-boundary care matchVSCodeWindowTitle
-// already takes for titles.
-func matchVSCodeWindowNestedPath(windows []vscodeWindow, path string) (string, bool) {
-	prefix := filepath.Clean(path) + string(filepath.Separator)
+// "Inside" is decided by git, not by raw path prefix: a window matches
+// when its focused file's work-tree root (toplevel("<dir of Path>"))
+// equals path's own root or sits underneath it. A bare prefix check
+// can't tell "window open on a subpackage of path" apart from "window
+// open on some unrelated folder that merely has a file inside path
+// focused right now" — a real misfire, observed live: windows scoped to
+// a worktree but currently showing a ~/scratch file made ~/scratch (and
+// $HOME, and every other ancestor of that file) "match" whatever window
+// enumerated first. Git grounding kills that class outright: a focused
+// file outside any work tree (scratch notes, /tmp, ...) resolves to ""
+// and never matches, and a path that isn't inside a work tree itself
+// has nothing to key on and never matches either.
+//
+// Otherwise this still fails closed, never wrongly claims a match: a
+// window sitting on the Explorer/Search panel or an empty editor group,
+// with no file currently focused, has Path == "" and looks
+// indistinguishable from one that was never opened on that path at all —
+// see vscodeWindows' own doc for why. That case is exactly what
+// matchVSCodeWindowBranch exists for (it runs next, keying on the
+// title's branch component instead).
+//
+// toplevel is injected so tests stay hermetic (production wires in
+// gitToplevel). Results are memoized per call: several windows frequently
+// have files focused in the same directory, and each lookup is a git
+// subprocess.
+func matchVSCodeWindowNestedPath(windows []vscodeWindow, path string, toplevel func(string) string) (string, bool) {
+	targetTop := toplevel(path)
+	if targetTop == "" {
+		return "", false
+	}
+	resolved := map[string]string{}
+	top := func(dir string) string {
+		if t, ok := resolved[dir]; ok {
+			return t
+		}
+		t := toplevel(dir)
+		resolved[dir] = t
+		return t
+	}
 	for _, w := range windows {
 		if w.Path == "" {
 			continue
 		}
-		if strings.HasPrefix(filepath.Clean(w.Path), prefix) {
+		// AXDocument tracks a file, and git -C needs a directory.
+		wt := top(filepath.Dir(w.Path))
+		if wt == "" {
+			continue
+		}
+		if wt == targetTop || strings.HasPrefix(wt, targetTop+string(filepath.Separator)) {
 			return w.Title, true
 		}
 	}

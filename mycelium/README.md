@@ -34,11 +34,16 @@ never-before-seen path: the already-open check finds the window
 stacks up duplicate windows.
 
 If nothing is open on the exact path, but some other window already has
-a file focused somewhere *inside* it — e.g. a monorepo subpackage opened
-directly as its own window — that window is reused too, via each
+a file focused inside its git work tree — e.g. a monorepo subpackage
+opened directly as its own window — that window is reused too, via each
 window's `AXDocument` accessibility attribute (the same one behind VS
 Code's title-bar proxy icon/breadcrumb), rather than opening a second,
-redundant window on the same tree.
+redundant window on the same tree. "Inside" is decided by comparing git
+work-tree roots (`git rev-parse --show-toplevel`), not by raw path
+prefix: a window scoped to an unrelated folder that merely has a file
+inside the target focused right now (a `~/scratch` note, say) must not
+claim the target, and neither side ever matches when it isn't inside a
+work tree at all.
 
 Callers that know which branch the path is on (understory always does)
 can pass it along, and matching gets two upgrades on top of that:

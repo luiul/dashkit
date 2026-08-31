@@ -5,11 +5,12 @@
 //
 // OpenVSCode's "already open" check isn't limited to a window scoped to
 // the exact path either: if nothing is open there, but some other
-// window already has a file focused somewhere *inside* that path (e.g.
-// a monorepo subpackage opened directly as its own window), that window
-// is reused too rather than opening a redundant new one alongside it —
-// see matchVSCodeWindowNestedPath's doc for how and why that's a
-// best-effort second check, not a guarantee. Callers that know which
+// window already has a file focused inside that path's git work tree
+// (e.g. a monorepo subpackage opened directly as its own window), that
+// window is reused too rather than opening a redundant new one
+// alongside it — see matchVSCodeWindowNestedPath's doc for how and why
+// that's a best-effort second check, not a guarantee, and for why the
+// "inside" test keys on git work trees rather than a raw path prefix. Callers that know which
 // branch path is on (understory always does; see OpenVSCode's own doc)
 // get two stronger matches on top: windows are matched on rootName +
 // branch together, so same-named folders on different branches (the
@@ -66,9 +67,11 @@ func defaultDeps() deps {
 			err := cmd.Run()
 			return err == nil, strings.TrimSpace(stderr.String())
 		},
-		vscodeWindows:        vscodeWindows,
-		matchWindowTitle:     matchVSCodeWindowTitle,
-		matchNestedWindow:    matchVSCodeWindowNestedPath,
+		vscodeWindows:    vscodeWindows,
+		matchWindowTitle: matchVSCodeWindowTitle,
+		matchNestedWindow: func(windows []vscodeWindow, path string) (string, bool) {
+			return matchVSCodeWindowNestedPath(windows, path, gitToplevel)
+		},
 		matchWindowBranch:    matchVSCodeWindowBranch,
 		raiseWindow:          vscodeRaiseWindow,
 		ghosttyFocusByCwd:    ghosttyFocusByCwd,
@@ -103,12 +106,13 @@ func defaultDeps() deps {
 // call, so nothing stacks up duplicate windows.
 //
 // If no window is open on path itself, OpenVSCode also checks for one
-// open somewhere *inside* path before giving up and opening a new window
-// there — first by focused file (matchVSCodeWindowNestedPath), then by
-// the branch in the title (matchVSCodeWindowBranch) — e.g. pressing
-// Enter on a monorepo worktree's root reuses a window already open on
-// one of its subpackages, rather than opening a second, redundant window
-// on the same tree.
+// open somewhere *inside* path's work tree before giving up and opening
+// a new window there — first by focused file
+// (matchVSCodeWindowNestedPath), then by the branch in the title
+// (matchVSCodeWindowBranch) — e.g. pressing Enter on a monorepo
+// worktree's root reuses a window already open on one of its
+// subpackages, rather than opening a second, redundant window on the
+// same tree.
 func OpenVSCode(path, branch string) Result {
 	return openVSCode(defaultDeps(), path, branch)
 }

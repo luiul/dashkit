@@ -1,6 +1,9 @@
 package mycelium
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestMatchVSCodeWindowTitleMatchesTheBareFolderName(t *testing.T) {
 	title, ok := matchVSCodeWindowTitle([]string{"canopy — main", "understory"}, "/x/understory", "")
@@ -196,13 +199,58 @@ func TestParseVSCodeTitleReturnsABareTitleAsRootOnly(t *testing.T) {
 	}
 }
 
+// rootedAt returns a fake git-toplevel resolver for the nested-match
+// tests: any directory inside one of the given work-tree roots resolves
+// to that root, everything else to "" (not a work tree). The boundary
+// check mirrors git's own: a root matches only the tree it actually
+// heads, never a sibling sharing a string prefix.
+func rootedAt(roots ...string) func(string) string {
+	return func(dir string) string {
+		for _, root := range roots {
+			if dir == root || strings.HasPrefix(dir, root+"/") {
+				return root
+			}
+		}
+		return ""
+	}
+}
+
 func TestMatchVSCodeWindowNestedPathMatchesAFileOpenSomewhereInside(t *testing.T) {
 	windows := []vscodeWindow{
 		{Title: "scm-analytics-engineers — deploy-full-cost", Path: "/x/tardis-community/pipelines/intl-scm-analytics/scm-analytics-engineers/README.md"},
 	}
-	title, ok := matchVSCodeWindowNestedPath(windows, "/x/tardis-community")
+	title, ok := matchVSCodeWindowNestedPath(windows, "/x/tardis-community", rootedAt("/x/tardis-community"))
 	if !ok || title != "scm-analytics-engineers — deploy-full-cost" {
 		t.Fatalf("got (%q, %v), want (%q, true)", title, ok, "scm-analytics-engineers — deploy-full-cost")
+	}
+}
+
+func TestMatchVSCodeWindowNestedPathMatchesAFileAnywhereInTheSameWorkTree(t *testing.T) {
+	// The match keys on the work tree, not on directory containment: a
+	// window with a file focused anywhere in path's repo counts as open
+	// inside path, even when that file sits directly at the repo root.
+	windows := []vscodeWindow{{Title: "tardis-community — main", Path: "/x/tardis-community/README.md"}}
+	title, ok := matchVSCodeWindowNestedPath(windows, "/x/tardis-community", rootedAt("/x/tardis-community"))
+	if !ok || title != "tardis-community — main" {
+		t.Fatalf("got (%q, %v), want a same-work-tree match", title, ok)
+	}
+}
+
+func TestMatchVSCodeWindowNestedPathMatchesANestedRepoInsideTheTarget(t *testing.T) {
+	// A window's file whose own work-tree root sits *underneath* path's
+	// (a submodule, a standalone clone vendored inside it) is genuinely
+	// scoped inside the target tree and matches.
+	windows := []vscodeWindow{{Title: "vendor-lib — main", Path: "/x/tardis-community/vendor/lib/main.go"}}
+	top := rootedAt("/x/tardis-community")
+	withNested := func(dir string) string {
+		if dir == "/x/tardis-community/vendor/lib" || strings.HasPrefix(dir, "/x/tardis-community/vendor/lib/") {
+			return "/x/tardis-community/vendor/lib"
+		}
+		return top(dir)
+	}
+	title, ok := matchVSCodeWindowNestedPath(windows, "/x/tardis-community", withNested)
+	if !ok || title != "vendor-lib — main" {
+		t.Fatalf("got (%q, %v), want the nested-repo window to match", title, ok)
 	}
 }
 
@@ -212,37 +260,49 @@ func TestMatchVSCodeWindowNestedPathSkipsWindowsWithNoFileFocused(t *testing.T) 
 	// treated as a match — that's indistinguishable from a window that
 	// was never opened on this path at all.
 	windows := []vscodeWindow{{Title: "scm-analytics-engineers — deploy-full-cost", Path: ""}}
-	_, ok := matchVSCodeWindowNestedPath(windows, "/x/tardis-community")
+	_, ok := matchVSCodeWindowNestedPath(windows, "/x/tardis-community", rootedAt("/x/tardis-community"))
 	if ok {
 		t.Fatalf("want no match when the candidate window has no file focused")
 	}
 }
 
-func TestMatchVSCodeWindowNestedPathDoesNotMatchASiblingWithASharedPrefix(t *testing.T) {
-	// "/x/tardis-community-lab" is not inside "/x/tardis-community": the
-	// match must require a real path-separator boundary, not just a
-	// shared string prefix, mirroring matchVSCodeWindowTitle's own
-	// word-boundary care for titles.
+func TestMatchVSCodeWindowNestedPathDoesNotMatchASiblingWorkTree(t *testing.T) {
+	// "/x/tardis-community-lab" is a different work tree from
+	// "/x/tardis-community": a shared string prefix is not containment.
 	windows := []vscodeWindow{{Title: "tardis-community-lab — main", Path: "/x/tardis-community-lab/README.md"}}
-	_, ok := matchVSCodeWindowNestedPath(windows, "/x/tardis-community")
+	_, ok := matchVSCodeWindowNestedPath(windows, "/x/tardis-community", rootedAt("/x/tardis-community", "/x/tardis-community-lab"))
 	if ok {
-		t.Fatalf("want no match against an unrelated sibling directory")
+		t.Fatalf("want no match against a sibling work tree")
 	}
 }
 
-func TestMatchVSCodeWindowNestedPathDoesNotMatchThePathItselfAsNested(t *testing.T) {
-	// A file literally at path (not inside a subdirectory of it) doesn't
-	// count as "nested": that's the exact-match case matchVSCodeWindowTitle
-	// already owns.
-	windows := []vscodeWindow{{Title: "tardis-community — main", Path: "/x/tardis-community"}}
-	_, ok := matchVSCodeWindowNestedPath(windows, "/x/tardis-community")
+func TestMatchVSCodeWindowNestedPathNeverMatchesAFileOutsideAnyWorkTree(t *testing.T) {
+	// The misfire this git grounding exists for: a window scoped to some
+	// unrelated folder but currently showing a ~/scratch file must not
+	// count as "open inside" any repo target — its focused file resolves
+	// to no work tree at all.
+	windows := []vscodeWindow{{Title: "global-ops — ISA-18423", Path: "/Users/x/scratch/note.md"}}
+	_, ok := matchVSCodeWindowNestedPath(windows, "/x/tardis-community", rootedAt("/x/tardis-community"))
 	if ok {
-		t.Fatalf("want no match when the window's path equals path itself, not a subdirectory of it")
+		t.Fatalf("want no match when the window's focused file is outside every work tree")
+	}
+}
+
+func TestMatchVSCodeWindowNestedPathNeverMatchesATargetOutsideAnyWorkTree(t *testing.T) {
+	// The other half of that misfire: a target that isn't inside a work
+	// tree itself (~/scratch, $HOME, /tmp) has nothing to key on, so a
+	// window that merely has one of its files focused must never claim
+	// it — before git grounding, $HOME "matched" whichever window
+	// enumerated first, since every file lives under it.
+	windows := []vscodeWindow{{Title: "global-ops — ISA-18423", Path: "/Users/x/scratch/note.md"}}
+	_, ok := matchVSCodeWindowNestedPath(windows, "/Users/x", rootedAt("/x/tardis-community"))
+	if ok {
+		t.Fatalf("want no match when the target itself is outside every work tree")
 	}
 }
 
 func TestMatchVSCodeWindowNestedPathNoMatchAgainstAnEmptyWindowList(t *testing.T) {
-	_, ok := matchVSCodeWindowNestedPath(nil, "/x/tardis-community")
+	_, ok := matchVSCodeWindowNestedPath(nil, "/x/tardis-community", rootedAt("/x/tardis-community"))
 	if ok {
 		t.Fatalf("want no match against an empty window list")
 	}
