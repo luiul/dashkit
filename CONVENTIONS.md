@@ -62,8 +62,16 @@ state machine lives in [confirm](confirm/README.md); the discipline is:
   confirm or cancel by accident.
 - **An unanswered prompt cancels itself after 10s**
   (`confirm.Timeout`), because rows keep repolling and reordering
-  underneath it. The timeout notifies ("cancelled: no answer within
-  10s"); an explicit cancel is silent.
+  underneath it.
+- **Every resolved prompt notifies.** A confirm ends in the action's
+  own result notification ("terminated pi (pid 86872)"), a cancel
+  answers with "cancelled", and the timeout's cancel carries its
+  reason ("cancelled: no answer within 10s"). A quiet cancel would
+  read exactly like a swallowed keypress: with every other key
+  swallowed, the user could not tell whether their `n` landed or the
+  prompt is still armed. The cancel text is shared from the confirm
+  package (`confirm.CancelText`), like `confirm.TimeoutText`, so the
+  two apps phrase it identically.
 - **Every poll revalidates the armed prompt's targets**
   (`confirm.Refresh`): targets that vanished from the fresh poll drop
   out, survivors are re-stamped with their fresh copies (a current
@@ -84,7 +92,8 @@ One voice across notifications, prompts, footers, and help text:
 
 - **Notifications are terse lowercase fragments with no trailing
   period**, matching the voice the footers already use: "terminated pi
-  (pid 86872)", "no stale worktrees to prune", "copied ~/worktrees/…".
+  (pid 86872)", "no stale worktrees to prune", "copied ~/worktrees/…",
+  "cancelled".
   Result notifications may carry detail (signal names, `wt`'s own
   refusal reason, a hint at `X` when a dirty worktree was refused).
 - **Prompts follow one template**: `<Verb> <target>? <Consequence
