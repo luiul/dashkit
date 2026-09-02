@@ -4,19 +4,25 @@
 // open somewhere.
 //
 // OpenVSCode's "already open" check isn't limited to a window scoped to
-// the exact path either: if nothing is open there, but some other
-// window already has a file focused inside that path's git work tree
-// (e.g. a monorepo subpackage opened directly as its own window), that
-// window is reused too rather than opening a redundant new one
-// alongside it — see matchVSCodeWindowNestedPath's doc for how and why
-// that's a best-effort second check, not a guarantee, and for why the
-// "inside" test keys on git work trees rather than a raw path prefix. Callers that know which
-// branch path is on (understory always does; see OpenVSCode's own doc)
-// get two stronger matches on top: windows are matched on rootName +
-// branch together, so same-named folders on different branches (the
-// main checkout vs. a branch worktree) stop being indistinguishable,
-// and a nested window with no file focused is still found by the branch
-// in its title (see matchVSCodeWindowBranch).
+// the exact path either. path can sit *inside* a checkout rather than
+// at its root (canopy hands over the agent's cwd as-is, e.g. a monorepo
+// package the agent runs in), so when nothing is open on path itself
+// the checkout's work-tree root gets a second exact-folder title match
+// before anything weaker runs: a window open on the root is scoped to
+// the exact tree path lives in, not merely somewhere inside it. And if
+// no window is open on either, but some other window already has a file
+// focused inside that path's git work tree (e.g. a monorepo subpackage
+// opened directly as its own window), that window is reused too rather
+// than opening a redundant new one alongside it — see
+// matchVSCodeWindowNestedPath's doc for how and why that's a
+// best-effort later check, not a guarantee, and for why the "inside"
+// test keys on git work trees rather than a raw path prefix. Callers
+// that know which branch path is on (understory always does; see
+// OpenVSCode's own doc) get two stronger matches on top: windows are
+// matched on rootName + branch together, so same-named folders on
+// different branches (the main checkout vs. a branch worktree) stop
+// being indistinguishable, and a nested window with no file focused is
+// still found by the branch in its title (see matchVSCodeWindowBranch).
 //
 // This is the underground layer shared by canopy (jump to whichever
 // window is actually running a given agent) and understory (open or
@@ -47,6 +53,7 @@ type deps struct {
 	runCommand           func(args []string) (exitOK bool, stderr string)
 	vscodeWindows        func() ([]vscodeWindow, error)
 	matchWindowTitle     func(titles []string, path, branch string) (string, bool)
+	toplevel             func(dir string) string
 	matchNestedWindow    func(windows []vscodeWindow, path string) (string, bool)
 	matchWindowBranch    func(titles []string, branch string) (string, bool)
 	raiseWindow          func(title string) (bool, error)
@@ -69,6 +76,7 @@ func defaultDeps() deps {
 		},
 		vscodeWindows:    vscodeWindows,
 		matchWindowTitle: matchVSCodeWindowTitle,
+		toplevel:         gitToplevel,
 		matchNestedWindow: func(windows []vscodeWindow, path string) (string, bool) {
 			return matchVSCodeWindowNestedPath(windows, path, gitToplevel)
 		},
@@ -105,9 +113,16 @@ func defaultDeps() deps {
 // finds the window OpenVSCode itself just created on every subsequent
 // call, so nothing stacks up duplicate windows.
 //
-// If no window is open on path itself, OpenVSCode also checks for one
-// open somewhere *inside* path's work tree before giving up and opening
-// a new window there — first by focused file
+// path can be a subdirectory of a checkout rather than its root (canopy
+// passes the agent's cwd as-is, e.g. a monorepo package the agent runs
+// in): when no window is open on path itself, the work-tree root gets a
+// second exact-folder title match, so a window open on the checkout as
+// a whole is still reused rather than a redundant new one opened next
+// to it.
+//
+// If no window is open on path or its work-tree root, OpenVSCode also
+// checks for one open somewhere *inside* path's work tree before giving
+// up and opening a new window there — first by focused file
 // (matchVSCodeWindowNestedPath), then by the branch in the title
 // (matchVSCodeWindowBranch) — e.g. pressing Enter on a monorepo
 // worktree's root reuses a window already open on one of its
@@ -130,11 +145,22 @@ func openVSCode(d deps, path, branch string) Result {
 		}
 		title, ok := d.matchWindowTitle(titles, path, branch)
 		if !ok {
-			// Nothing open on path itself: check for a window already open
-			// somewhere inside it — first by focused file, then, for a
-			// nested window with no file focused, by the branch in its
-			// title — before falling all the way through to opening a
-			// brand-new one.
+			// Nothing open on path itself. path can be a subdirectory of
+			// a checkout (canopy hands over the agent's cwd as-is, e.g. a
+			// monorepo package the agent runs in), so try the work-tree
+			// root as a second exact-folder match before the weaker
+			// signals below: a window open on the root is scoped to the
+			// exact tree path lives in, not merely somewhere inside it.
+			if root := d.toplevel(path); root != "" && root != path {
+				title, ok = d.matchWindowTitle(titles, root, branch)
+			}
+		}
+		if !ok {
+			// No window scoped to path or its work-tree root either:
+			// check for one already open somewhere *inside* path's tree —
+			// first by focused file, then, for a nested window with no
+			// file focused, by the branch in its title — before falling
+			// all the way through to opening a brand-new one.
 			title, ok = d.matchNestedWindow(windows, path)
 			if !ok {
 				title, ok = d.matchWindowBranch(titles, branch)

@@ -247,8 +247,9 @@ func matchVSCodeWindowTitle(titles []string, path, branch string) (string, bool)
 // — e.g. path is a monorepo worktree's root and some other window already
 // has one of its subpackages open directly, with a file focused there.
 // This is meant to run only once matchVSCodeWindowTitle has already ruled
-// out a window open on path itself: a window scoped to the exact folder
-// is always preferred over reusing one merely scoped somewhere inside it.
+// out a window open on path itself or on its work-tree root: a window
+// scoped to an exact folder is always preferred over reusing one merely
+// scoped somewhere inside it.
 //
 // "Inside" is decided by git, not by raw path prefix: a window matches
 // when its focused file's work-tree root (toplevel("<dir of Path>"))

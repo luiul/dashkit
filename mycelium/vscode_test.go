@@ -94,6 +94,20 @@ func TestMatchVSCodeWindowTitleWithBranchStillRejectsAnUnrelatedLongerName(t *te
 	}
 }
 
+func TestMatchVSCodeWindowTitleMatchesAMonorepoSubpackageWindowByRootNameAndBranch(t *testing.T) {
+	// The reported canopy bug: a window open directly on a monorepo
+	// package (…/scm-analytics-engineers/dbt) titles itself with the
+	// package's own folder name and the repo's branch, so an agent cwd
+	// pointing at that package matches it exactly — even on a generic
+	// branch, since the rootName half disambiguates (the generic-branch
+	// guard applies only to the branch-*only* match).
+	titles := []string{"scm-analytics-engineers", "dbt — master", "dashkit — main"}
+	title, ok := matchVSCodeWindowTitle(titles, "/Users/x/tardis-community/pipelines/intl-scm-analytics/scm-analytics-engineers/dbt", "master")
+	if !ok || title != "dbt — master" {
+		t.Fatalf("got (%q, %v), want the subpackage window", title, ok)
+	}
+}
+
 func TestMatchVSCodeWindowBranchFindsTheOneWindowCarryingTheBranch(t *testing.T) {
 	// The reported scenario: the window to reuse is open on a subpackage
 	// inside the worktree and has no file focused, so only its title's

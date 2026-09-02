@@ -33,12 +33,19 @@ never-before-seen path: the already-open check finds the window
 `OpenVSCode` itself just created on every subsequent call, so nothing
 stacks up duplicate windows.
 
-If nothing is open on the exact path, but some other window already has
-a file focused inside its git work tree — e.g. a monorepo subpackage
-opened directly as its own window — that window is reused too, via each
-window's `AXDocument` accessibility attribute (the same one behind VS
-Code's title-bar proxy icon/breadcrumb), rather than opening a second,
-redundant window on the same tree. "Inside" is decided by comparing git
+The path handed over can also sit *inside* a checkout rather than at
+its root (canopy passes the agent's cwd as-is, e.g. a monorepo package
+the agent runs in). When nothing is open on the exact path, the
+checkout's work-tree root gets a second exact-folder title match, so a
+window open on the checkout as a whole is still reused rather than a
+redundant new one opened next to it.
+
+If nothing is open on the exact path or its work-tree root, but some
+other window already has a file focused inside its git work tree — e.g.
+a monorepo subpackage opened directly as its own window — that window
+is reused too, via each window's `AXDocument` accessibility attribute
+(the same one behind VS Code's title-bar proxy icon/breadcrumb), rather
+than opening a second, redundant window on the same tree. "Inside" is decided by comparing git
 work-tree roots (`git rev-parse --show-toplevel`), not by raw path
 prefix: a window scoped to an unrelated folder that merely has a file
 inside the target focused right now (a `~/scratch` note, say) must not

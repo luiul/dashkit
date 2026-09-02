@@ -17,6 +17,7 @@ func fakeDeps() deps {
 		runCommand:           func(args []string) (bool, string) { return true, "" },
 		vscodeWindows:        func() ([]vscodeWindow, error) { return nil, nil },
 		matchWindowTitle:     func(titles []string, path, branch string) (string, bool) { return "", false },
+		toplevel:             func(dir string) string { return "" },
 		matchNestedWindow:    func(windows []vscodeWindow, path string) (string, bool) { return "", false },
 		matchWindowBranch:    func(titles []string, branch string) (string, bool) { return "", false },
 		raiseWindow:          func(title string) (bool, error) { return false, nil },
@@ -91,12 +92,129 @@ func TestOpenVSCodeRaisesANestedWindowWhenNoneIsOpenOnTheExactPath(t *testing.T)
 	}
 }
 
+func TestOpenVSCodeFallsBackToTheWorkTreeRootTitle(t *testing.T) {
+	// canopy hands the agent's cwd over as-is, and that cwd can be a
+	// subdirectory of a checkout (a monorepo package the agent runs in).
+	// When no window is open on the cwd itself but one is open on the
+	// work-tree root, that root window is an exact-folder match for the
+	// tree and must be raised — before the weaker nested/branch signals
+	// are consulted, and never a new window opened alongside it.
+	d := fakeDeps()
+	d.toplevel = func(dir string) string {
+		if dir == "/Users/x/tardis-community/pipelines/dbt" {
+			return "/Users/x/tardis-community"
+		}
+		return ""
+	}
+	var titlePaths []string
+	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) {
+		titlePaths = append(titlePaths, path)
+		if path == "/Users/x/tardis-community" {
+			return "tardis-community — master", true
+		}
+		return "", false
+	}
+	d.matchNestedWindow = func(windows []vscodeWindow, path string) (string, bool) {
+		t.Fatalf("want matchNestedWindow never consulted once the work-tree root title matched")
+		return "", false
+	}
+	var raisedTitle string
+	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
+	codeCalled := false
+	d.runCommand = func(args []string) (bool, string) { codeCalled = true; return true, "" }
+
+	result := openVSCode(d, "/Users/x/tardis-community/pipelines/dbt", "master")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if raisedTitle != "tardis-community — master" {
+		t.Fatalf("got raised title %q, want the work-tree root window's title", raisedTitle)
+	}
+	if codeCalled {
+		t.Fatalf("want the code CLI never invoked once the root window was raised")
+	}
+	want := []string{"/Users/x/tardis-community/pipelines/dbt", "/Users/x/tardis-community"}
+	if len(titlePaths) != len(want) {
+		t.Fatalf("got title match attempts %v, want %v (exact path first, work-tree root second)", titlePaths, want)
+	}
+	for i := range want {
+		if titlePaths[i] != want[i] {
+			t.Fatalf("got title match attempts %v, want %v", titlePaths, want)
+		}
+	}
+}
+
+func TestOpenVSCodeNeverConsultsTheRootFallbackAfterAnExactMatch(t *testing.T) {
+	// A window open on the exact path wins outright: the work-tree root
+	// lookup (a git subprocess) must not even run.
+	d := fakeDeps()
+	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) {
+		return "dbt — master", true
+	}
+	d.toplevel = func(dir string) string {
+		t.Fatalf("want toplevel never consulted once the exact match already succeeded")
+		return ""
+	}
+	d.raiseWindow = func(title string) (bool, error) { return true, nil }
+
+	openVSCode(d, "/Users/x/tardis-community/pipelines/dbt", "master")
+}
+
+func TestOpenVSCodeSkipsTheRootFallbackWhenPathIsAlreadyTheRoot(t *testing.T) {
+	// A path that already is its work-tree root (every understory
+	// worktree row) gets exactly one title match attempt, not a
+	// redundant second one against the same path.
+	d := fakeDeps()
+	d.toplevel = func(dir string) string { return dir }
+	var titlePaths []string
+	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) {
+		titlePaths = append(titlePaths, path)
+		return "", false
+	}
+
+	openVSCode(d, "/Users/x/tardis-community", "master")
+
+	if len(titlePaths) != 1 || titlePaths[0] != "/Users/x/tardis-community" {
+		t.Fatalf("got title match attempts %v, want exactly one, against the path itself", titlePaths)
+	}
+}
+
+func TestOpenVSCodeFallsThroughToTheNestedMatchWhenTheRootTitleMissesToo(t *testing.T) {
+	// The root fallback sits between the exact match and the nested one:
+	// when neither title match finds anything, the focused-file check
+	// still runs.
+	d := fakeDeps()
+	d.toplevel = func(dir string) string { return "/Users/x/tardis-community" }
+	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) { return "", false }
+	nestedConsulted := false
+	d.matchNestedWindow = func(windows []vscodeWindow, path string) (string, bool) {
+		nestedConsulted = true
+		return "scm-analytics-engineers — master", true
+	}
+	var raisedTitle string
+	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
+
+	result := openVSCode(d, "/Users/x/tardis-community/pipelines/dbt", "master")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if !nestedConsulted {
+		t.Fatalf("want the nested match consulted once both title matches missed")
+	}
+	if raisedTitle != "scm-analytics-engineers — master" {
+		t.Fatalf("got raised title %q, want the nested window's title", raisedTitle)
+	}
+}
+
 func TestOpenVSCodeRaisesAWindowMatchedByBranchAlone(t *testing.T) {
 	// The reported bug: a window open on a subpackage inside the
-	// worktree, with no file focused in it — invisible to both the exact
-	// title match and the AXDocument nested match, findable only by the
-	// branch in its title. That window must be raised, never a new one
-	// opened alongside it.
+	// worktree, with no file focused in it — invisible to the exact
+	// title match, the work-tree root fallback (fakeDeps' toplevel
+	// reports no work tree here), and the AXDocument nested match —
+	// findable only by the branch in its title. That window must be
+	// raised, never a new one opened alongside it.
 	d := fakeDeps()
 	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) { return "", false }
 	d.matchNestedWindow = func(windows []vscodeWindow, path string) (string, bool) { return "", false }
