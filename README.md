@@ -222,6 +222,13 @@ matching by working directory (Ghostty's `tty`/`pid` AppleScript
 properties don't reliably work as of Ghostty 1.3.1; working directory
 does).
 
+`mycelium.SnapshotVSCode` is the read-only half: one queryable snapshot
+of which VS Code windows are open, for dashboards showing per-row
+window state (the "VS Code open?" columns) rather than acting on one
+selected row. Each `IsOpen(path, branch)` runs the exact same match
+cascade `OpenVSCode` does, so the column says "open" precisely when
+Enter would focus an existing window instead of opening a new one.
+
 ### Usage
 
 ```go
@@ -231,6 +238,9 @@ result := mycelium.OpenVSCode("/Users/you/code/some-repo")
 // result.OK, result.Message
 
 result = mycelium.OpenGhostty("/Users/you/code/some-repo")
+
+snapshot := mycelium.SnapshotVSCode() // one listing per poll
+open := snapshot.IsOpen("/Users/you/code/some-repo", "main")
 ```
 
 Both currently macOS-only: window detection shells out to `osascript`.

@@ -139,34 +139,7 @@ func openVSCode(d deps, path, branch string) Result {
 
 	windows, windowsErr := d.vscodeWindows()
 	if windowsErr == nil {
-		titles := make([]string, len(windows))
-		for i, w := range windows {
-			titles[i] = w.Title
-		}
-		title, ok := d.matchWindowTitle(titles, path, branch)
-		if !ok {
-			// Nothing open on path itself. path can be a subdirectory of
-			// a checkout (canopy hands over the agent's cwd as-is, e.g. a
-			// monorepo package the agent runs in), so try the work-tree
-			// root as a second exact-folder match before the weaker
-			// signals below: a window open on the root is scoped to the
-			// exact tree path lives in, not merely somewhere inside it.
-			if root := d.toplevel(path); root != "" && root != path {
-				title, ok = d.matchWindowTitle(titles, root, branch)
-			}
-		}
-		if !ok {
-			// No window scoped to path or its work-tree root either:
-			// check for one already open somewhere *inside* path's tree —
-			// first by focused file, then, for a nested window with no
-			// file focused, by the branch in its title — before falling
-			// all the way through to opening a brand-new one.
-			title, ok = d.matchNestedWindow(windows, path)
-			if !ok {
-				title, ok = d.matchWindowBranch(titles, branch)
-			}
-		}
-		if ok {
+		if title, ok := findWindow(d, windows, path, branch); ok {
 			if raised, raiseErr := d.raiseWindow(title); raiseErr == nil && raised {
 				return Result{true, "Focused VS Code window for " + path + "."}
 			}
@@ -207,6 +180,47 @@ func openVSCode(d deps, path, branch string) Result {
 		stderr = "Couldn't open VS Code."
 	}
 	return Result{false, stderr}
+}
+
+// findWindow is OpenVSCode's already-open check, extracted so
+// VSCodeSnapshot.IsOpen (the read-only "is a window already open on
+// this path?" query backing the dashboards' VS Code columns) runs the
+// exact same cascade Enter's open-or-focus does: a column built on it
+// says "open" precisely when OpenVSCode would focus rather than create.
+// Returns the matching window's title, or ok=false when nothing
+// currently open matches.
+//
+// The cascade, strongest signal first:
+//
+//  1. matchWindowTitle on path itself (rootName+branch together when
+//     the caller knows the branch; see matchVSCodeWindowTitle's doc).
+//  2. matchWindowTitle on path's git work-tree root. path can be a
+//     subdirectory of a checkout rather than its root (canopy hands
+//     over the agent's cwd as-is, e.g. a monorepo package the agent
+//     runs in), and a window open on the root is scoped to the exact
+//     tree path lives in, not merely somewhere inside it.
+//  3. matchNestedWindow: a window open somewhere *inside* path's tree,
+//     found by its currently focused file (see
+//     matchVSCodeWindowNestedPath's doc).
+//  4. matchWindowBranch: a nested window with no file focused, found
+//     by the branch in its title (see matchVSCodeWindowBranch's doc).
+func findWindow(d deps, windows []vscodeWindow, path, branch string) (string, bool) {
+	titles := make([]string, len(windows))
+	for i, w := range windows {
+		titles[i] = w.Title
+	}
+	if title, ok := d.matchWindowTitle(titles, path, branch); ok {
+		return title, true
+	}
+	if root := d.toplevel(path); root != "" && root != path {
+		if title, ok := d.matchWindowTitle(titles, root, branch); ok {
+			return title, true
+		}
+	}
+	if title, ok := d.matchNestedWindow(windows, path); ok {
+		return title, true
+	}
+	return d.matchWindowBranch(titles, branch)
 }
 
 // OpenGhostty focuses a Ghostty terminal whose working directory is
