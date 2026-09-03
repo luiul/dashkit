@@ -174,3 +174,38 @@ func TestSnapshotAgreesWithOpenVSCode(t *testing.T) {
 		}
 	}
 }
+
+func TestSnapshotIsOpenOnWorktreeIsTheStrictDestructivePromptMatch(t *testing.T) {
+	windows := []vscodeWindow{
+		{Title: "dotfiles — fix-x — .zshrc"},
+		{Title: "understory"}, // bare title: no branch information
+		{Title: "canopy — fix-y", Path: "/Users/x/canopy/main.go"},
+		{Title: "bar — main", Path: "/Users/x/monorepo/packages/bar/main.go"},
+	}
+	toplevel := fakeToplevel("/Users/x/dotfiles", "/Users/x/understory", "/Users/x/monorepo")
+
+	cases := []struct {
+		name         string
+		path, branch string
+		want         bool
+	}{
+		{"window titled with root and branch", "/Users/x/dotfiles", "fix-x", true},
+		{"bare title of the same root is not enough", "/Users/x/understory", "fix-y", false},
+		// The branch-only fallback findWindow ends with is not consulted:
+		// a window on a differently-named folder carrying the branch does
+		// not make deleting THIS worktree strand it.
+		{"branch on a different root does not count", "/Users/x/understory", "fix-x", false},
+		// A window with a file focused inside the tree (e.g. scoped to a
+		// subpackage) is stranded by the removal too, whatever its title.
+		{"focused file inside the tree counts", "/Users/x/monorepo", "anything", true},
+		{"unrelated path", "/Users/x/nowhere", "fix-x", false},
+		{"empty path never matches", "", "fix-x", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := snapshotWith(windows, toplevel).IsOpenOnWorktree(tc.path, tc.branch); got != tc.want {
+				t.Fatalf("IsOpenOnWorktree(%q, %q) = %v, want %v", tc.path, tc.branch, got, tc.want)
+			}
+		})
+	}
+}

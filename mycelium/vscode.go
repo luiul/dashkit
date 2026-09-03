@@ -242,6 +242,41 @@ func matchVSCodeWindowTitle(titles []string, path, branch string) (string, bool)
 	return "", false
 }
 
+// matchVSCodeWindowTitleStrict is matchVSCodeWindowTitle's branch-aware
+// match without its branchless weak fallback: a title must name the
+// path's basename as its root component AND branch as its branch
+// component, or it reports nothing. Built for destructive-action warnings
+// (understory's and coppice's remove prompts), where the cost of a false
+// "open" is the opposite of open-or-focus's: focusing an existing window
+// when a new one was warranted is harmless, but crying "a window has this
+// worktree open" on a deletion prompt when none does trains the user to
+// ignore the warning. The weak fallback would do exactly that on any repo
+// with a bare-titled window around (a main checkout whose SCM branch
+// hasn't resolved renders as the plain folder name, matching every
+// worktree removal for that repo). Observed live on the sandbox repo:
+// two bare "sandbox" scratch windows made every sandbox worktree removal
+// warn.
+//
+// What strictness cannot fix: a window scoped to the main checkout whose
+// SCM view has a worktree as its active repository renders that
+// worktree's branch in its title without having the worktree's folder
+// open, and the title is indistinguishable from a genuine worktree
+// window's (both can carry no editor component). Those phantoms still
+// match; the warning's advice is harmless for them.
+func matchVSCodeWindowTitleStrict(titles []string, path, branch string) (string, bool) {
+	base := filepath.Base(path)
+	if base == "" || branch == "" {
+		return "", false
+	}
+	for _, title := range titles {
+		root, titleBranch := parseVSCodeTitle(title)
+		if root == base && titleBranch == branch {
+			return title, true
+		}
+	}
+	return "", false
+}
+
 // matchVSCodeWindowNestedPath finds a window whose currently active file
 // (vscodeWindow.Path, from AXDocument) lives inside path's git work tree
 // — e.g. path is a monorepo worktree's root and some other window already

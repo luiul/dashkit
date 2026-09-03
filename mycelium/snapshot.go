@@ -90,3 +90,37 @@ func (s *VSCodeSnapshot) IsOpen(path, branch string) bool {
 	_, ok := findWindow(s.deps, s.windows, path, branch)
 	return ok
 }
+
+// IsOpenOnWorktree reports whether a VS Code window is currently open ON
+// the worktree at path (its root, or a subpackage inside its tree),
+// strictly: the title must name path's basename AND branch (see
+// matchVSCodeWindowTitleStrict for why the branchless weak fallback
+// IsOpen inherits is dropped here), or a window's focused file must live
+// inside path's work tree (matchVSCodeWindowNestedPath — a window scoped
+// to a subpackage of the worktree is stranded by its removal too). The
+// branch-only fallback findWindow ends with is NOT consulted: it answers
+// "is this branch visible in some window", not "would deleting this
+// worktree strand a window".
+//
+// Use this, not IsOpen, when the answer feeds a destructive-action
+// warning (understory's and coppice's remove prompts): IsOpen's
+// open-or-focus semantics tolerate false opens (they merely focus a
+// window), while a false open on a deletion prompt cries wolf.
+//
+// Same closed failure as IsOpen: false when the snapshot failed to list
+// windows (Err non-nil) or path is "". Without a branch, only the
+// nested-path match can still fire.
+func (s *VSCodeSnapshot) IsOpenOnWorktree(path, branch string) bool {
+	if s.err != nil || path == "" {
+		return false
+	}
+	titles := make([]string, len(s.windows))
+	for i, w := range s.windows {
+		titles[i] = w.Title
+	}
+	if _, ok := matchVSCodeWindowTitleStrict(titles, path, branch); ok {
+		return true
+	}
+	_, ok := s.deps.matchNestedWindow(s.windows, path)
+	return ok
+}

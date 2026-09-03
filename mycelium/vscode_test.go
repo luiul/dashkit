@@ -402,3 +402,41 @@ func TestParseVSCodeWindowListIsEmptyForAnEmptyInput(t *testing.T) {
 		t.Fatalf("got %+v, want nil for an empty input", windows)
 	}
 }
+
+func TestMatchVSCodeWindowTitleStrictMatchesRootAndBranch(t *testing.T) {
+	title, ok := matchVSCodeWindowTitleStrict([]string{"dotfiles — fix-x — .zshrc"}, "/x/dotfiles", "fix-x")
+	if !ok || title != "dotfiles — fix-x — .zshrc" {
+		t.Fatalf("got (%q, %v), want a match", title, ok)
+	}
+}
+
+func TestMatchVSCodeWindowTitleStrictDropsTheBranchlessWeakFallback(t *testing.T) {
+	// The difference from matchVSCodeWindowTitle that the strict variant
+	// exists for (see its doc): a bare "dotfiles" title carries no branch
+	// information, and for a destructive-action warning matching it would
+	// fire on every removal while any bare-titled window of that repo is
+	// around (e.g. a main checkout whose SCM branch hasn't resolved).
+	if _, ok := matchVSCodeWindowTitleStrict([]string{"dotfiles"}, "/x/dotfiles", "fix-x"); ok {
+		t.Fatalf("want no match for a branchless title")
+	}
+}
+
+func TestMatchVSCodeWindowTitleStrictRejectsADifferentBranch(t *testing.T) {
+	// A same-named folder on another branch (the main checkout's window)
+	// is not a window on this worktree.
+	if _, ok := matchVSCodeWindowTitleStrict([]string{"dotfiles — main"}, "/x/dotfiles", "fix-x"); ok {
+		t.Fatalf("want no match for a different branch")
+	}
+}
+
+func TestMatchVSCodeWindowTitleStrictRejectsAnUnrelatedLongerName(t *testing.T) {
+	if _, ok := matchVSCodeWindowTitleStrict([]string{"understory-lab — fix-x"}, "/x/understory", "fix-x"); ok {
+		t.Fatalf("want no match for a prefix-sibling root")
+	}
+}
+
+func TestMatchVSCodeWindowTitleStrictNeedsABranch(t *testing.T) {
+	if _, ok := matchVSCodeWindowTitleStrict([]string{"dotfiles — fix-x"}, "/x/dotfiles", ""); ok {
+		t.Fatalf("want no match without a branch to key on")
+	}
+}
