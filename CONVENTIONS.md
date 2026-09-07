@@ -213,9 +213,10 @@ Hard-won rendering rules, each with a bug behind it:
   entries whose heartbeat stopped. The writer must be the extension,
   never the opening tools: a registry written by the openers misses
   manually opened windows, the "already open?" check says no, and the
-  duplicate window this exists to prevent comes back. The AppleScript
-  title cascade remains as the fallback until `fallback.log` in the
-  same directory shows it unused.
+  duplicate window this exists to prevent comes back. (The AppleScript
+  title cascade this replaced was deleted in dashkit v0.8.0 after the
+  registry proved itself; `fallback.log` in the same directory was the
+  evidence.)
 - **Merge each fresh poll against the previous one** so a single missed
   scan doesn't flicker rows away (canopy's `internal/registry`).
 - **Every delayed self-message carries a token.** Arming or resolving
@@ -238,13 +239,13 @@ Hard-won rendering rules, each with a bug behind it:
 - **Never signal a process without re-checking its identity first**:
   pid plus lifetime from a fresh `ps` snapshot, so a recycled pid is
   never signaled by mistake (canopy's `internal/kill`).
-- **Window matching fails safe.** Ambiguity opens a new window rather
-  than focusing an arbitrary one; generic branch names (`main`,
-  `master`, `develop`, `trunk`) never match by branch alone; "inside
-  the same worktree" is decided by `git rev-parse --show-toplevel`
-  roots, not path prefixes (mycelium). On the registry path none of
-  this comes up: identity is a folder path, so there is nothing to be
-  ambiguous about. These guards protect the title fallback.
+- **Window matching fails safe.** Identity is a folder path from the
+  window registry, so there is nothing to be ambiguous about; "inside
+  the same worktree" for the work-tree-root match is decided by `git
+  rev-parse --show-toplevel`, and nested matches respect path-element
+  boundaries (`/wt-a` never matches `/wt-a-b`). (The title-matching era
+  needed more guards: branch disambiguation, generic-branch bans,
+  ambiguity refusals. All deleted with it in v0.8.0.)
 - **Fail loudly at startup, not silently later**: canopy checks for
   macOS and exits with a clear error anywhere else; a failed process
   scan shows a warning banner rather than looking identical to "no

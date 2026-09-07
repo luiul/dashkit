@@ -5,11 +5,10 @@ package mycelium
 // vscode-window-registry extension (see dashkit's top-level
 // vscode-window-registry/ directory for the writer and the contract),
 // and OpenVSCode/VSCodeSnapshot match against those records by exact
-// folder path instead of parsing window titles over AppleScript. The
-// title cascade stays as the fallback for when the registry cannot
-// answer (extension not installed, no window activated yet); every
-// fallback use is logged to fallback.log in the same directory, which
-// is the data source for deciding when the fallback can be deleted.
+// folder path. When the registry cannot answer at all (extension not
+// installed, directory unreadable), OpenVSCode degrades to the `code`
+// CLI's own best effort and logs the miss to fallback.log in the same
+// directory, so a broken extension is visible rather than silent.
 
 import (
 	"encoding/json"
@@ -167,11 +166,10 @@ func matchRegistryOnWorktree(entries []registryEntry, path string) bool {
 }
 
 // logRegistryFallback appends one line to fallback.log in the registry
-// directory every time a caller had to use the AppleScript title
-// cascade because the registry could not answer. The log is the data
-// source for the decision to delete the title cascade: once daily use
-// produces zero fallback lines for weeks, the fallback is dead code in
-// practice. Best effort by design: observability must never break or
+// directory every time the registry could not answer at all (extension
+// not installed, directory unreadable) and OpenVSCode had to degrade to
+// the CLI's best effort. The log makes a broken or missing extension
+// visible. Best effort by design: observability must never break or
 // slow the action it observes, so every failure is swallowed. The
 // directory is created if missing so the "extension not installed at
 // all" case is recorded too.

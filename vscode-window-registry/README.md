@@ -60,9 +60,10 @@ One file per window: `~/.local/state/vscode-windows/<sessionId>.json`.
   JSON.
 
 The readers live in [../mycelium](../mycelium/README.md) (Go) and in
-coppice's `vscode.py` (Python). Both treat the registry as the primary
-source and keep the old title matching as the fallback for when the
-registry is missing or has no fresh entries.
+coppice's `vscode.py` (Python). The registry is their only source of
+window identity: when it cannot answer (extension not installed), tools
+degrade to the `code` CLI's best effort and stay silent on deletion
+prompts rather than parsing titles.
 
 ## Install
 

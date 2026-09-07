@@ -6,25 +6,17 @@ import (
 )
 
 // fakeDeps returns deps with every field faked to safe no-op defaults
-// (registry absent, no window already open, code CLI present, every
-// command "succeeds", every Ghostty call a no-op), so each test only
-// needs to override the one or two fields it cares about instead of
-// restating the whole struct, and so unit tests never shell out to
-// osascript or the real `code` CLI. The registry is absent by default
-// so the pre-registry tests below keep exercising the title fallback
-// unchanged; registry tests override readRegistry.
+// (registry absent, code CLI present, every command "succeeds", every
+// Ghostty call a no-op), so each test only needs to override the one or
+// two fields it cares about instead of restating the whole struct, and
+// so unit tests never shell out to osascript or the real `code` CLI.
 func fakeDeps() deps {
 	return deps{
 		lookPathCode:         func() (string, bool) { return "/usr/local/bin/code", true },
 		runCommand:           func(args []string) (bool, string) { return true, "" },
 		readRegistry:         func() ([]registryEntry, bool) { return nil, false },
 		logFallback:          func(reason, path string) {},
-		vscodeWindows:        func() ([]vscodeWindow, error) { return nil, nil },
-		matchWindowTitle:     func(titles []string, path, branch string) (string, bool) { return "", false },
 		toplevel:             func(dir string) string { return "" },
-		matchNestedWindow:    func(windows []vscodeWindow, path string) (string, bool) { return "", false },
-		matchWindowBranch:    func(titles []string, branch string) (string, bool) { return "", false },
-		raiseWindow:          func(title string) (bool, error) { return false, nil },
 		ghosttyFocusByCwd:    func(cwd string) (bool, error) { return false, nil },
 		ghosttyOpenNewWindow: func(cwd string) error { return nil },
 	}
@@ -39,283 +31,71 @@ func contains(s, substr string) bool {
 	return false
 }
 
-func TestOpenVSCodeRaisesTheExistingWindowInsteadOfShellingOutToCode(t *testing.T) {
-	// The switch-to-already-open half: when a window already has this
-	// path's folder open, OpenVSCode should raise it directly and never
-	// touch the `code` CLI at all (that's the whole point of checking
-	// first, instead of trusting `code --reuse-window` to guess right).
+func TestOpenVSCodeFocusesViaTheRegistry(t *testing.T) {
+	// A fresh registry entry names the window's folder, so focusing is
+	// `code --reuse-window <folder>`.
 	d := fakeDeps()
-	d.vscodeWindows = func() ([]vscodeWindow, error) { return []vscodeWindow{{Title: "dotfiles — main"}}, nil }
-	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) {
-		return "dotfiles — main", true
+	d.readRegistry = func() ([]registryEntry, bool) {
+		return []registryEntry{{SessionID: "1", Folders: []string{"/Users/x/dotfiles"}}}, true
 	}
-	var raisedTitle string
-	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
-	codeCalled := false
-	d.runCommand = func(args []string) (bool, string) { codeCalled = true; return true, "" }
-
-	result := openVSCode(d, "/Users/x/dotfiles", "")
-
-	if !result.OK {
-		t.Fatalf("want ok, got %+v", result)
-	}
-	if raisedTitle != "dotfiles — main" {
-		t.Fatalf("got raised title %q, want %q", raisedTitle, "dotfiles — main")
-	}
-	if codeCalled {
-		t.Fatalf("want the code CLI never invoked once an existing window was raised")
-	}
-}
-
-func TestOpenVSCodeRaisesANestedWindowWhenNoneIsOpenOnTheExactPath(t *testing.T) {
-	// The new half: pressing Enter on a monorepo worktree's root should
-	// reuse a window already open on one of its subpackages, rather than
-	// opening a second, redundant window on the same tree — but only
-	// once matchWindowTitle has already ruled out a window open on the
-	// exact path itself.
-	d := fakeDeps()
-	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) { return "", false }
-	d.matchNestedWindow = func(windows []vscodeWindow, path string) (string, bool) {
-		return "scm-analytics-engineers — deploy-full-cost", true
-	}
-	var raisedTitle string
-	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
-	codeCalled := false
-	d.runCommand = func(args []string) (bool, string) { codeCalled = true; return true, "" }
-
-	result := openVSCode(d, "/Users/x/tardis-community", "")
-
-	if !result.OK {
-		t.Fatalf("want ok, got %+v", result)
-	}
-	if raisedTitle != "scm-analytics-engineers — deploy-full-cost" {
-		t.Fatalf("got raised title %q, want the nested window's title", raisedTitle)
-	}
-	if codeCalled {
-		t.Fatalf("want the code CLI never invoked once a nested window was raised")
-	}
-}
-
-func TestOpenVSCodeFallsBackToTheWorkTreeRootTitle(t *testing.T) {
-	// canopy hands the agent's cwd over as-is, and that cwd can be a
-	// subdirectory of a checkout (a monorepo package the agent runs in).
-	// When no window is open on the cwd itself but one is open on the
-	// work-tree root, that root window is an exact-folder match for the
-	// tree and must be raised — before the weaker nested/branch signals
-	// are consulted, and never a new window opened alongside it.
-	d := fakeDeps()
-	d.toplevel = func(dir string) string {
-		if dir == "/Users/x/tardis-community/pipelines/dbt" {
-			return "/Users/x/tardis-community"
-		}
-		return ""
-	}
-	var titlePaths []string
-	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) {
-		titlePaths = append(titlePaths, path)
-		if path == "/Users/x/tardis-community" {
-			return "tardis-community — master", true
-		}
-		return "", false
-	}
-	d.matchNestedWindow = func(windows []vscodeWindow, path string) (string, bool) {
-		t.Fatalf("want matchNestedWindow never consulted once the work-tree root title matched")
-		return "", false
-	}
-	var raisedTitle string
-	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
-	codeCalled := false
-	d.runCommand = func(args []string) (bool, string) { codeCalled = true; return true, "" }
-
-	result := openVSCode(d, "/Users/x/tardis-community/pipelines/dbt", "master")
-
-	if !result.OK {
-		t.Fatalf("want ok, got %+v", result)
-	}
-	if raisedTitle != "tardis-community — master" {
-		t.Fatalf("got raised title %q, want the work-tree root window's title", raisedTitle)
-	}
-	if codeCalled {
-		t.Fatalf("want the code CLI never invoked once the root window was raised")
-	}
-	want := []string{"/Users/x/tardis-community/pipelines/dbt", "/Users/x/tardis-community"}
-	if len(titlePaths) != len(want) {
-		t.Fatalf("got title match attempts %v, want %v (exact path first, work-tree root second)", titlePaths, want)
-	}
-	for i := range want {
-		if titlePaths[i] != want[i] {
-			t.Fatalf("got title match attempts %v, want %v", titlePaths, want)
-		}
-	}
-}
-
-func TestOpenVSCodeNeverConsultsTheRootFallbackAfterAnExactMatch(t *testing.T) {
-	// A window open on the exact path wins outright: the work-tree root
-	// lookup (a git subprocess) must not even run.
-	d := fakeDeps()
-	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) {
-		return "dbt — master", true
-	}
-	d.toplevel = func(dir string) string {
-		t.Fatalf("want toplevel never consulted once the exact match already succeeded")
-		return ""
-	}
-	d.raiseWindow = func(title string) (bool, error) { return true, nil }
-
-	openVSCode(d, "/Users/x/tardis-community/pipelines/dbt", "master")
-}
-
-func TestOpenVSCodeSkipsTheRootFallbackWhenPathIsAlreadyTheRoot(t *testing.T) {
-	// A path that already is its work-tree root (every understory
-	// worktree row) gets exactly one title match attempt, not a
-	// redundant second one against the same path.
-	d := fakeDeps()
-	d.toplevel = func(dir string) string { return dir }
-	var titlePaths []string
-	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) {
-		titlePaths = append(titlePaths, path)
-		return "", false
-	}
-
-	openVSCode(d, "/Users/x/tardis-community", "master")
-
-	if len(titlePaths) != 1 || titlePaths[0] != "/Users/x/tardis-community" {
-		t.Fatalf("got title match attempts %v, want exactly one, against the path itself", titlePaths)
-	}
-}
-
-func TestOpenVSCodeFallsThroughToTheNestedMatchWhenTheRootTitleMissesToo(t *testing.T) {
-	// The root fallback sits between the exact match and the nested one:
-	// when neither title match finds anything, the focused-file check
-	// still runs.
-	d := fakeDeps()
-	d.toplevel = func(dir string) string { return "/Users/x/tardis-community" }
-	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) { return "", false }
-	nestedConsulted := false
-	d.matchNestedWindow = func(windows []vscodeWindow, path string) (string, bool) {
-		nestedConsulted = true
-		return "scm-analytics-engineers — master", true
-	}
-	var raisedTitle string
-	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
-
-	result := openVSCode(d, "/Users/x/tardis-community/pipelines/dbt", "master")
-
-	if !result.OK {
-		t.Fatalf("want ok, got %+v", result)
-	}
-	if !nestedConsulted {
-		t.Fatalf("want the nested match consulted once both title matches missed")
-	}
-	if raisedTitle != "scm-analytics-engineers — master" {
-		t.Fatalf("got raised title %q, want the nested window's title", raisedTitle)
-	}
-}
-
-func TestOpenVSCodeRaisesAWindowMatchedByBranchAlone(t *testing.T) {
-	// The reported bug: a window open on a subpackage inside the
-	// worktree, with no file focused in it — invisible to the exact
-	// title match, the work-tree root fallback (fakeDeps' toplevel
-	// reports no work tree here), and the AXDocument nested match —
-	// findable only by the branch in its title. That window must be
-	// raised, never a new one opened alongside it.
-	d := fakeDeps()
-	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) { return "", false }
-	d.matchNestedWindow = func(windows []vscodeWindow, path string) (string, bool) { return "", false }
-	d.matchWindowBranch = func(titles []string, branch string) (string, bool) {
-		if branch != "patch/ISA-18409" {
-			t.Fatalf("got branch %q, want it threaded through to the branch match", branch)
-		}
-		return "scm-analytics-engineers — patch/ISA-18409", true
-	}
-	var raisedTitle string
-	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
-	codeCalled := false
-	d.runCommand = func(args []string) (bool, string) { codeCalled = true; return true, "" }
-
-	result := openVSCode(d, "/Users/x/worktrees/x/tardis-community", "patch/ISA-18409")
-
-	if !result.OK {
-		t.Fatalf("want ok, got %+v", result)
-	}
-	if raisedTitle != "scm-analytics-engineers — patch/ISA-18409" {
-		t.Fatalf("got raised title %q, want the branch-matched window's title", raisedTitle)
-	}
-	if codeCalled {
-		t.Fatalf("want the code CLI never invoked once a branch-matched window was raised")
-	}
-}
-
-func TestOpenVSCodeThreadsTheBranchIntoTheExactTitleMatch(t *testing.T) {
-	d := fakeDeps()
-	var gotBranch string
-	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) {
-		gotBranch = branch
-		return "tardis-community — patch/ISA-18409", true
-	}
-	d.raiseWindow = func(title string) (bool, error) { return true, nil }
-
-	openVSCode(d, "/Users/x/worktrees/x/tardis-community", "patch/ISA-18409")
-
-	if gotBranch != "patch/ISA-18409" {
-		t.Fatalf("got branch %q passed to the title match, want %q", gotBranch, "patch/ISA-18409")
-	}
-}
-
-func TestOpenVSCodePrefersTheNestedPathMatchOverTheBranchMatch(t *testing.T) {
-	// A focused file inside path is path-proven; the branch in a title is
-	// inference. Inference never outranks proof.
-	d := fakeDeps()
-	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) { return "", false }
-	d.matchNestedWindow = func(windows []vscodeWindow, path string) (string, bool) {
-		return "scm-analytics-engineers — deploy-full-cost", true
-	}
-	d.matchWindowBranch = func(titles []string, branch string) (string, bool) {
-		t.Fatalf("want matchWindowBranch never called once the nested path match already succeeded")
-		return "", false
-	}
-	var raisedTitle string
-	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
-
-	openVSCode(d, "/Users/x/tardis-community", "deploy-full-cost")
-
-	if raisedTitle != "scm-analytics-engineers — deploy-full-cost" {
-		t.Fatalf("got raised title %q, want the nested path match's title", raisedTitle)
-	}
-}
-
-func TestOpenVSCodePrefersTheExactMatchOverANestedOne(t *testing.T) {
-	// A window open on the exact path always wins over one merely
-	// scoped somewhere inside it: matchNestedWindow should never even be
-	// consulted once matchWindowTitle already found a match.
-	d := fakeDeps()
-	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) {
-		return "tardis-community — main", true
-	}
-	d.matchNestedWindow = func(windows []vscodeWindow, path string) (string, bool) {
-		t.Fatalf("want matchNestedWindow never called once the exact match already succeeded")
-		return "", false
-	}
-	var raisedTitle string
-	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
-
-	openVSCode(d, "/Users/x/tardis-community", "")
-
-	if raisedTitle != "tardis-community — main" {
-		t.Fatalf("got raised title %q, want the exact match's title", raisedTitle)
-	}
-}
-
-func TestOpenVSCodeForcesANewWindowWhenNoneIsAlreadyOpen(t *testing.T) {
-	// The case a path that's never been opened before always hits:
-	// vscodeWindows finds nothing, so OpenVSCode must force a genuinely
-	// new window (-n) rather than handing --reuse-window to the CLI and
-	// letting it fall back to hijacking some unrelated window.
-	d := fakeDeps()
 	var gotArgs []string
 	d.runCommand = func(args []string) (bool, string) { gotArgs = args; return true, "" }
 
-	result := openVSCode(d, "/Users/x/dotfiles", "")
+	result := openVSCode(d, "/Users/x/dotfiles")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	want := []string{"/usr/local/bin/code", "--reuse-window", "/Users/x/dotfiles"}
+	if len(gotArgs) != len(want) {
+		t.Fatalf("got %v, want %v", gotArgs, want)
+	}
+	for i := range want {
+		if gotArgs[i] != want[i] {
+			t.Fatalf("got %v, want %v", gotArgs, want)
+		}
+	}
+}
+
+func TestOpenVSCodeRegistryFocusUsesTheWorkspaceFileForMultiRootWindows(t *testing.T) {
+	d := fakeDeps()
+	d.readRegistry = func() ([]registryEntry, bool) {
+		return []registryEntry{{
+			SessionID:     "1",
+			Folders:       []string{"/Users/x/tardis-community", "/Users/x/tardis-community/scm-analytics-engineers"},
+			WorkspaceFile: "/Users/x/tardis-community.code-workspace",
+		}}, true
+	}
+	var gotArgs []string
+	d.runCommand = func(args []string) (bool, string) { gotArgs = args; return true, "" }
+
+	result := openVSCode(d, "/Users/x/tardis-community/scm-analytics-engineers")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	want := []string{"/usr/local/bin/code", "--reuse-window", "/Users/x/tardis-community.code-workspace"}
+	if len(gotArgs) != len(want) {
+		t.Fatalf("got %v, want %v", gotArgs, want)
+	}
+	for i := range want {
+		if gotArgs[i] != want[i] {
+			t.Fatalf("got %v, want %v", gotArgs, want)
+		}
+	}
+}
+
+func TestOpenVSCodeRegistryMissOpensAGenuinelyNewWindow(t *testing.T) {
+	// The registry answered and nothing matches: nothing is open on
+	// this path, proven, so -n is safe.
+	d := fakeDeps()
+	d.readRegistry = func() ([]registryEntry, bool) {
+		return []registryEntry{{SessionID: "1", Folders: []string{"/Users/x/canopy"}}}, true
+	}
+	var gotArgs []string
+	d.runCommand = func(args []string) (bool, string) { gotArgs = args; return true, "" }
+
+	result := openVSCode(d, "/Users/x/dotfiles")
 
 	if !result.OK {
 		t.Fatalf("want ok, got %+v", result)
@@ -331,22 +111,15 @@ func TestOpenVSCodeForcesANewWindowWhenNoneIsAlreadyOpen(t *testing.T) {
 	}
 }
 
-func TestOpenVSCodeForcesANewWindowWhenTheMatchedWindowIsGone(t *testing.T) {
-	// vscodeWindows can be stale: the matched window may have closed
-	// between that check and the raise attempt. raiseWindow reporting
-	// "not found" (false, nil) should fall through to opening fresh
-	// (still forced via -n, since the check itself did succeed), not
-	// report failure.
+func TestOpenVSCodeEmptyRegistryOpensAGenuinelyNewWindow(t *testing.T) {
+	// The registry answered and is empty (VS Code closed, or no window
+	// has a folder open): nothing is open, proven, so -n is safe.
 	d := fakeDeps()
-	d.vscodeWindows = func() ([]vscodeWindow, error) { return []vscodeWindow{{Title: "dotfiles — main"}}, nil }
-	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) {
-		return "dotfiles — main", true
-	}
-	d.raiseWindow = func(title string) (bool, error) { return false, nil }
+	d.readRegistry = func() ([]registryEntry, bool) { return nil, true }
 	var gotArgs []string
 	d.runCommand = func(args []string) (bool, string) { gotArgs = args; return true, "" }
 
-	result := openVSCode(d, "/Users/x/dotfiles", "")
+	result := openVSCode(d, "/Users/x/dotfiles")
 
 	if !result.OK {
 		t.Fatalf("want ok, got %+v", result)
@@ -362,24 +135,49 @@ func TestOpenVSCodeForcesANewWindowWhenTheMatchedWindowIsGone(t *testing.T) {
 	}
 }
 
-func TestOpenVSCodeFallsBackToReuseWindowWhenTheAlreadyOpenCheckItselfErrors(t *testing.T) {
-	// vscodeWindows erroring (e.g. the Automation permission for
-	// scripting VS Code hasn't been granted yet) means OpenVSCode
-	// genuinely doesn't know whether a window is already open. Falling
-	// back to --reuse-window here, rather than unconditionally forcing
-	// -n, keeps repeated presses on the same path from stacking up
-	// duplicate windows for anyone who hasn't granted that permission.
+func TestOpenVSCodeRegistryMatchButFailedFocusOpensANewWindow(t *testing.T) {
+	// The window the registry pointed at could not be focused (it may
+	// have closed inside the staleness window): fall through to a new
+	// window, same as a clean miss.
 	d := fakeDeps()
-	d.vscodeWindows = func() ([]vscodeWindow, error) { return nil, errors.New("not authorized") }
+	d.readRegistry = func() ([]registryEntry, bool) {
+		return []registryEntry{{SessionID: "1", Folders: []string{"/Users/x/dotfiles"}}}, true
+	}
+	var calls [][]string
+	d.runCommand = func(args []string) (bool, string) {
+		calls = append(calls, args)
+		return len(calls) > 1, "" // the --reuse-window fails, the -n succeeds
+	}
+
+	result := openVSCode(d, "/Users/x/dotfiles")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if len(calls) != 2 || calls[0][1] != "--reuse-window" || calls[1][1] != "-n" {
+		t.Fatalf("got calls %v, want --reuse-window then -n", calls)
+	}
+}
+
+func TestOpenVSCodeDegradesToReuseWindowWhenTheRegistryIsMissing(t *testing.T) {
+	// Extension not installed: there is no way to tell what is open, so
+	// the CLI's own best-effort --reuse-window is the least-bad option,
+	// and the miss is logged so a broken extension is visible.
+	d := fakeDeps()
 	var gotArgs []string
 	d.runCommand = func(args []string) (bool, string) { gotArgs = args; return true, "" }
+	var loggedReason string
+	d.logFallback = func(reason, path string) { loggedReason = reason }
 
-	openVSCode(d, "/x", "")
+	result := openVSCode(d, "/Users/x/dotfiles")
 
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
 	found := false
 	for _, a := range gotArgs {
 		if a == "-n" {
-			t.Fatalf("got args %v, want no -n when the already-open check errored", gotArgs)
+			t.Fatalf("got args %v, want no -n when the registry can't answer", gotArgs)
 		}
 		if a == "--reuse-window" {
 			found = true
@@ -388,15 +186,19 @@ func TestOpenVSCodeFallsBackToReuseWindowWhenTheAlreadyOpenCheckItselfErrors(t *
 	if !found {
 		t.Fatalf("got args %v, want --reuse-window", gotArgs)
 	}
+	if loggedReason != "registry-missing" {
+		t.Fatalf("got logged reason %q, want registry-missing", loggedReason)
+	}
 }
 
 func TestOpenVSCodeFallsBackToOpenWhenCodeCLIMissing(t *testing.T) {
 	d := fakeDeps()
+	d.readRegistry = func() ([]registryEntry, bool) { return nil, true }
 	d.lookPathCode = func() (string, bool) { return "", false }
 	var gotArgs []string
 	d.runCommand = func(args []string) (bool, string) { gotArgs = args; return true, "" }
 
-	result := openVSCode(d, "/Users/x/dotfiles", "")
+	result := openVSCode(d, "/Users/x/dotfiles")
 
 	if !result.OK {
 		t.Fatalf("want ok, got %+v", result)
@@ -413,7 +215,7 @@ func TestOpenVSCodeFallsBackToOpenWhenCodeCLIMissing(t *testing.T) {
 }
 
 func TestOpenVSCodeWithoutAPathFailsClearly(t *testing.T) {
-	result := openVSCode(fakeDeps(), "", "")
+	result := openVSCode(fakeDeps(), "")
 	if result.OK {
 		t.Fatalf("want not ok, got %+v", result)
 	}
@@ -486,176 +288,5 @@ func TestOpenGhosttySurfacesAutomationPermissionErrors(t *testing.T) {
 	}
 	if !contains(result.Message, "Automation permission") {
 		t.Fatalf("got message %q", result.Message)
-	}
-}
-
-func TestOpenVSCodeFocusesViaTheRegistryWithoutTouchingAppleScript(t *testing.T) {
-	// The primary path: a fresh registry entry names the window's
-	// folder, so focusing is `code --reuse-window <folder>` and neither
-	// the AppleScript listing nor the title matchers may run.
-	d := fakeDeps()
-	d.readRegistry = func() ([]registryEntry, bool) {
-		return []registryEntry{{SessionID: "1", Folders: []string{"/Users/x/dotfiles"}}}, true
-	}
-	d.vscodeWindows = func() ([]vscodeWindow, error) {
-		t.Fatalf("want the AppleScript window listing never run when the registry has fresh entries")
-		return nil, nil
-	}
-	d.raiseWindow = func(title string) (bool, error) {
-		t.Fatalf("want raise-by-title never used on the registry path")
-		return false, nil
-	}
-	var gotArgs []string
-	d.runCommand = func(args []string) (bool, string) { gotArgs = args; return true, "" }
-
-	result := openVSCode(d, "/Users/x/dotfiles", "")
-
-	if !result.OK {
-		t.Fatalf("want ok, got %+v", result)
-	}
-	want := []string{"/usr/local/bin/code", "--reuse-window", "/Users/x/dotfiles"}
-	if len(gotArgs) != len(want) {
-		t.Fatalf("got %v, want %v", gotArgs, want)
-	}
-	for i := range want {
-		if gotArgs[i] != want[i] {
-			t.Fatalf("got %v, want %v", gotArgs, want)
-		}
-	}
-}
-
-func TestOpenVSCodeRegistryFocusUsesTheWorkspaceFileForMultiRootWindows(t *testing.T) {
-	d := fakeDeps()
-	d.readRegistry = func() ([]registryEntry, bool) {
-		return []registryEntry{{
-			SessionID:     "1",
-			Folders:       []string{"/Users/x/tardis-community", "/Users/x/tardis-community/scm-analytics-engineers"},
-			WorkspaceFile: "/Users/x/tardis-community.code-workspace",
-		}}, true
-	}
-	var gotArgs []string
-	d.runCommand = func(args []string) (bool, string) { gotArgs = args; return true, "" }
-
-	result := openVSCode(d, "/Users/x/tardis-community/scm-analytics-engineers", "")
-
-	if !result.OK {
-		t.Fatalf("want ok, got %+v", result)
-	}
-	want := []string{"/usr/local/bin/code", "--reuse-window", "/Users/x/tardis-community.code-workspace"}
-	if len(gotArgs) != len(want) {
-		t.Fatalf("got %v, want %v", gotArgs, want)
-	}
-	for i := range want {
-		if gotArgs[i] != want[i] {
-			t.Fatalf("got %v, want %v", gotArgs, want)
-		}
-	}
-}
-
-func TestOpenVSCodeRegistryMissOpensAGenuinelyNewWindow(t *testing.T) {
-	// The registry answered and nothing matches: nothing is open on
-	// this path, proven, so -n is safe and no title check runs first.
-	d := fakeDeps()
-	d.readRegistry = func() ([]registryEntry, bool) {
-		return []registryEntry{{SessionID: "1", Folders: []string{"/Users/x/canopy"}}}, true
-	}
-	d.vscodeWindows = func() ([]vscodeWindow, error) {
-		t.Fatalf("want the AppleScript window listing never run when the registry has fresh entries")
-		return nil, nil
-	}
-	var gotArgs []string
-	d.runCommand = func(args []string) (bool, string) { gotArgs = args; return true, "" }
-
-	result := openVSCode(d, "/Users/x/dotfiles", "")
-
-	if !result.OK {
-		t.Fatalf("want ok, got %+v", result)
-	}
-	want := []string{"/usr/local/bin/code", "-n", "/Users/x/dotfiles"}
-	if len(gotArgs) != len(want) {
-		t.Fatalf("got %v, want %v", gotArgs, want)
-	}
-	for i := range want {
-		if gotArgs[i] != want[i] {
-			t.Fatalf("got %v, want %v", gotArgs, want)
-		}
-	}
-}
-
-func TestOpenVSCodeRegistryMatchButFailedFocusOpensANewWindow(t *testing.T) {
-	// The window the registry pointed at could not be focused (it may
-	// have closed inside the staleness window): fall through to a new
-	// window, same as a clean miss.
-	d := fakeDeps()
-	d.readRegistry = func() ([]registryEntry, bool) {
-		return []registryEntry{{SessionID: "1", Folders: []string{"/Users/x/dotfiles"}}}, true
-	}
-	var calls [][]string
-	d.runCommand = func(args []string) (bool, string) {
-		calls = append(calls, args)
-		return len(calls) > 1, "" // the --reuse-window fails, the -n succeeds
-	}
-
-	result := openVSCode(d, "/Users/x/dotfiles", "")
-
-	if !result.OK {
-		t.Fatalf("want ok, got %+v", result)
-	}
-	if len(calls) != 2 || calls[0][1] != "--reuse-window" || calls[1][1] != "-n" {
-		t.Fatalf("got calls %v, want --reuse-window then -n", calls)
-	}
-}
-
-func TestOpenVSCodeFallsBackToTitlesWhenTheRegistryIsMissing(t *testing.T) {
-	// Extension not installed: today's title cascade runs unchanged,
-	// and the fallback use is logged (the Phase 2 gate's data source).
-	d := fakeDeps()
-	d.vscodeWindows = func() ([]vscodeWindow, error) { return []vscodeWindow{{Title: "dotfiles — main"}}, nil }
-	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) {
-		return "dotfiles — main", true
-	}
-	var raisedTitle string
-	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
-	var loggedReason string
-	d.logFallback = func(reason, path string) { loggedReason = reason }
-
-	result := openVSCode(d, "/Users/x/dotfiles", "")
-
-	if !result.OK {
-		t.Fatalf("want ok, got %+v", result)
-	}
-	if raisedTitle != "dotfiles — main" {
-		t.Fatalf("got raised title %q, want the title fallback to have run", raisedTitle)
-	}
-	if loggedReason != "registry-missing" {
-		t.Fatalf("got logged reason %q, want registry-missing", loggedReason)
-	}
-}
-
-func TestOpenVSCodeFallsBackToTitlesWhenTheRegistryHasNoFreshEntries(t *testing.T) {
-	// The registry directory reads fine but nothing is fresh (VS Code
-	// closed, or no window has activated the extension yet): same
-	// fallback, logged under its own reason.
-	d := fakeDeps()
-	d.readRegistry = func() ([]registryEntry, bool) { return nil, true }
-	d.vscodeWindows = func() ([]vscodeWindow, error) { return []vscodeWindow{{Title: "dotfiles — main"}}, nil }
-	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) {
-		return "dotfiles — main", true
-	}
-	var raisedTitle string
-	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
-	var loggedReason string
-	d.logFallback = func(reason, path string) { loggedReason = reason }
-
-	result := openVSCode(d, "/Users/x/dotfiles", "")
-
-	if !result.OK {
-		t.Fatalf("want ok, got %+v", result)
-	}
-	if raisedTitle != "dotfiles — main" {
-		t.Fatalf("got raised title %q, want the title fallback to have run", raisedTitle)
-	}
-	if loggedReason != "registry-empty" {
-		t.Fatalf("got logged reason %q, want registry-empty", loggedReason)
 	}
 }

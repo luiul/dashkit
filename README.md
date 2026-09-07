@@ -216,10 +216,8 @@ registry: every VS Code window self-registers into
 `~/.local/state/vscode-windows/` via the small
 [vscode-window-registry](vscode-window-registry/README.md) extension,
 so matching is exact folder paths and focusing is a safe
-`code --reuse-window`. The older AppleScript title matching remains as
-the fallback for when the registry cannot answer, and every fallback
-use is logged. That makes it safe to call repeatedly on the same
-never-before-seen path: the already-open check finds the window
+`code --reuse-window`. That makes it safe to call repeatedly on the
+same never-before-seen path: the already-open check finds the window
 `OpenVSCode` itself just created on every subsequent call, so nothing
 stacks up duplicate windows.
 
@@ -231,7 +229,7 @@ does).
 `mycelium.SnapshotVSCode` is the read-only half: one queryable snapshot
 of which VS Code windows are open, for dashboards showing per-row
 window state (the "VS Code open?" columns) rather than acting on one
-selected row. Each `IsOpen(path, branch)` runs the exact same match
+selected row. Each `IsOpen(path)` runs the exact same match
 `OpenVSCode` does, so the column says "open" precisely when Enter would
 focus an existing window instead of opening a new one.
 
@@ -245,19 +243,19 @@ result := mycelium.OpenVSCode("/Users/you/code/some-repo")
 
 result = mycelium.OpenGhostty("/Users/you/code/some-repo")
 
-snapshot := mycelium.SnapshotVSCode() // one listing per poll
-open := snapshot.IsOpen("/Users/you/code/some-repo", "main")
+snapshot := mycelium.SnapshotVSCode() // one registry read per poll
+open := snapshot.IsOpen("/Users/you/code/some-repo")
 ```
 
-Both currently macOS-only: window detection shells out to `osascript`.
-Ghostty's own scripting dictionary and VS Code's `System Events` window
-titles are both macOS-specific; there's no equivalent implementation for
-other platforms yet.
+Both currently macOS-only: the VS Code side is portable (the extension
+and the reader are plain files), but Ghostty's window detection shells
+out to `osascript`, and there is no equivalent implementation for other
+platforms yet.
 
 ### Errors
 
-A failed AppleScript call surfaces as `*mycelium.AutomationError`, or
-more specifically `*mycelium.AutomationPermissionError` when it looks
+A failed AppleScript call (Ghostty) surfaces as `*mycelium.AutomationError`,
+or more specifically `*mycelium.AutomationPermissionError` when it looks
 like macOS's Automation permission for scripting the target app hasn't
 been granted yet (System Settings → Privacy & Security → Automation).
 `Result.Message` is already a human-readable rendering of either, meant
