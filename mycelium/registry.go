@@ -63,7 +63,8 @@ func registryDir() string {
 
 // readRegistry lists the fresh registry entries under dir. ok is false
 // when the directory cannot be read at all (extension not installed,
-// most likely): the caller falls back to the title cascade. Individual
+// most likely): OpenVSCode then degrades to the `code` CLI's own best
+// effort and logs the miss (see logRegistryFallback). Individual
 // files that are stale (mtime older than registryStaleness), unreadable,
 // or unparseable are skipped, never fatal: a torn write or a foreign
 // file must not take window detection down. ok stays true when every
