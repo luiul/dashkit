@@ -205,6 +205,17 @@ Hard-won rendering rules, each with a bug behind it:
   syncs across instances through the filesystem
   (`~/.pi/agent/canopy-status/acks/`), within one poll interval, with
   no daemon and no locking.
+- **VS Code window identity comes from a per-window registry, not from
+  parsing window titles.** A tiny extension (dashkit's
+  `vscode-window-registry/`) runs in every window and heartbeats one
+  small JSON file per window into `~/.local/state/vscode-windows/`;
+  readers (mycelium, coppice) match by exact folder path and prune
+  entries whose heartbeat stopped. The writer must be the extension,
+  never the opening tools: a registry written by the openers misses
+  manually opened windows, the "already open?" check says no, and the
+  duplicate window this exists to prevent comes back. The AppleScript
+  title cascade remains as the fallback until `fallback.log` in the
+  same directory shows it unused.
 - **Merge each fresh poll against the previous one** so a single missed
   scan doesn't flicker rows away (canopy's `internal/registry`).
 - **Every delayed self-message carries a token.** Arming or resolving
@@ -231,7 +242,9 @@ Hard-won rendering rules, each with a bug behind it:
   than focusing an arbitrary one; generic branch names (`main`,
   `master`, `develop`, `trunk`) never match by branch alone; "inside
   the same worktree" is decided by `git rev-parse --show-toplevel`
-  roots, not path prefixes (mycelium).
+  roots, not path prefixes (mycelium). On the registry path none of
+  this comes up: identity is a folder path, so there is nothing to be
+  ambiguous about. These guards protect the title fallback.
 - **Fail loudly at startup, not silently later**: canopy checks for
   macOS and exits with a clear error anywhere else; a failed process
   scan shows a warning banner rather than looking identical to "no

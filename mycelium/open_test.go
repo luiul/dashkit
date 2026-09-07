@@ -6,15 +6,19 @@ import (
 )
 
 // fakeDeps returns deps with every field faked to safe no-op defaults
-// (no window already open, code CLI present, every command "succeeds",
-// every Ghostty call a no-op), so each test only needs to override the
-// one or two fields it cares about instead of restating the whole
-// struct, and so unit tests never shell out to osascript or the real
-// `code` CLI.
+// (registry absent, no window already open, code CLI present, every
+// command "succeeds", every Ghostty call a no-op), so each test only
+// needs to override the one or two fields it cares about instead of
+// restating the whole struct, and so unit tests never shell out to
+// osascript or the real `code` CLI. The registry is absent by default
+// so the pre-registry tests below keep exercising the title fallback
+// unchanged; registry tests override readRegistry.
 func fakeDeps() deps {
 	return deps{
 		lookPathCode:         func() (string, bool) { return "/usr/local/bin/code", true },
 		runCommand:           func(args []string) (bool, string) { return true, "" },
+		readRegistry:         func() ([]registryEntry, bool) { return nil, false },
+		logFallback:          func(reason, path string) {},
 		vscodeWindows:        func() ([]vscodeWindow, error) { return nil, nil },
 		matchWindowTitle:     func(titles []string, path, branch string) (string, bool) { return "", false },
 		toplevel:             func(dir string) string { return "" },
@@ -482,5 +486,176 @@ func TestOpenGhosttySurfacesAutomationPermissionErrors(t *testing.T) {
 	}
 	if !contains(result.Message, "Automation permission") {
 		t.Fatalf("got message %q", result.Message)
+	}
+}
+
+func TestOpenVSCodeFocusesViaTheRegistryWithoutTouchingAppleScript(t *testing.T) {
+	// The primary path: a fresh registry entry names the window's
+	// folder, so focusing is `code --reuse-window <folder>` and neither
+	// the AppleScript listing nor the title matchers may run.
+	d := fakeDeps()
+	d.readRegistry = func() ([]registryEntry, bool) {
+		return []registryEntry{{SessionID: "1", Folders: []string{"/Users/x/dotfiles"}}}, true
+	}
+	d.vscodeWindows = func() ([]vscodeWindow, error) {
+		t.Fatalf("want the AppleScript window listing never run when the registry has fresh entries")
+		return nil, nil
+	}
+	d.raiseWindow = func(title string) (bool, error) {
+		t.Fatalf("want raise-by-title never used on the registry path")
+		return false, nil
+	}
+	var gotArgs []string
+	d.runCommand = func(args []string) (bool, string) { gotArgs = args; return true, "" }
+
+	result := openVSCode(d, "/Users/x/dotfiles", "")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	want := []string{"/usr/local/bin/code", "--reuse-window", "/Users/x/dotfiles"}
+	if len(gotArgs) != len(want) {
+		t.Fatalf("got %v, want %v", gotArgs, want)
+	}
+	for i := range want {
+		if gotArgs[i] != want[i] {
+			t.Fatalf("got %v, want %v", gotArgs, want)
+		}
+	}
+}
+
+func TestOpenVSCodeRegistryFocusUsesTheWorkspaceFileForMultiRootWindows(t *testing.T) {
+	d := fakeDeps()
+	d.readRegistry = func() ([]registryEntry, bool) {
+		return []registryEntry{{
+			SessionID:     "1",
+			Folders:       []string{"/Users/x/tardis-community", "/Users/x/tardis-community/scm-analytics-engineers"},
+			WorkspaceFile: "/Users/x/tardis-community.code-workspace",
+		}}, true
+	}
+	var gotArgs []string
+	d.runCommand = func(args []string) (bool, string) { gotArgs = args; return true, "" }
+
+	result := openVSCode(d, "/Users/x/tardis-community/scm-analytics-engineers", "")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	want := []string{"/usr/local/bin/code", "--reuse-window", "/Users/x/tardis-community.code-workspace"}
+	if len(gotArgs) != len(want) {
+		t.Fatalf("got %v, want %v", gotArgs, want)
+	}
+	for i := range want {
+		if gotArgs[i] != want[i] {
+			t.Fatalf("got %v, want %v", gotArgs, want)
+		}
+	}
+}
+
+func TestOpenVSCodeRegistryMissOpensAGenuinelyNewWindow(t *testing.T) {
+	// The registry answered and nothing matches: nothing is open on
+	// this path, proven, so -n is safe and no title check runs first.
+	d := fakeDeps()
+	d.readRegistry = func() ([]registryEntry, bool) {
+		return []registryEntry{{SessionID: "1", Folders: []string{"/Users/x/canopy"}}}, true
+	}
+	d.vscodeWindows = func() ([]vscodeWindow, error) {
+		t.Fatalf("want the AppleScript window listing never run when the registry has fresh entries")
+		return nil, nil
+	}
+	var gotArgs []string
+	d.runCommand = func(args []string) (bool, string) { gotArgs = args; return true, "" }
+
+	result := openVSCode(d, "/Users/x/dotfiles", "")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	want := []string{"/usr/local/bin/code", "-n", "/Users/x/dotfiles"}
+	if len(gotArgs) != len(want) {
+		t.Fatalf("got %v, want %v", gotArgs, want)
+	}
+	for i := range want {
+		if gotArgs[i] != want[i] {
+			t.Fatalf("got %v, want %v", gotArgs, want)
+		}
+	}
+}
+
+func TestOpenVSCodeRegistryMatchButFailedFocusOpensANewWindow(t *testing.T) {
+	// The window the registry pointed at could not be focused (it may
+	// have closed inside the staleness window): fall through to a new
+	// window, same as a clean miss.
+	d := fakeDeps()
+	d.readRegistry = func() ([]registryEntry, bool) {
+		return []registryEntry{{SessionID: "1", Folders: []string{"/Users/x/dotfiles"}}}, true
+	}
+	var calls [][]string
+	d.runCommand = func(args []string) (bool, string) {
+		calls = append(calls, args)
+		return len(calls) > 1, "" // the --reuse-window fails, the -n succeeds
+	}
+
+	result := openVSCode(d, "/Users/x/dotfiles", "")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if len(calls) != 2 || calls[0][1] != "--reuse-window" || calls[1][1] != "-n" {
+		t.Fatalf("got calls %v, want --reuse-window then -n", calls)
+	}
+}
+
+func TestOpenVSCodeFallsBackToTitlesWhenTheRegistryIsMissing(t *testing.T) {
+	// Extension not installed: today's title cascade runs unchanged,
+	// and the fallback use is logged (the Phase 2 gate's data source).
+	d := fakeDeps()
+	d.vscodeWindows = func() ([]vscodeWindow, error) { return []vscodeWindow{{Title: "dotfiles — main"}}, nil }
+	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) {
+		return "dotfiles — main", true
+	}
+	var raisedTitle string
+	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
+	var loggedReason string
+	d.logFallback = func(reason, path string) { loggedReason = reason }
+
+	result := openVSCode(d, "/Users/x/dotfiles", "")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if raisedTitle != "dotfiles — main" {
+		t.Fatalf("got raised title %q, want the title fallback to have run", raisedTitle)
+	}
+	if loggedReason != "registry-missing" {
+		t.Fatalf("got logged reason %q, want registry-missing", loggedReason)
+	}
+}
+
+func TestOpenVSCodeFallsBackToTitlesWhenTheRegistryHasNoFreshEntries(t *testing.T) {
+	// The registry directory reads fine but nothing is fresh (VS Code
+	// closed, or no window has activated the extension yet): same
+	// fallback, logged under its own reason.
+	d := fakeDeps()
+	d.readRegistry = func() ([]registryEntry, bool) { return nil, true }
+	d.vscodeWindows = func() ([]vscodeWindow, error) { return []vscodeWindow{{Title: "dotfiles — main"}}, nil }
+	d.matchWindowTitle = func(titles []string, path, branch string) (string, bool) {
+		return "dotfiles — main", true
+	}
+	var raisedTitle string
+	d.raiseWindow = func(title string) (bool, error) { raisedTitle = title; return true, nil }
+	var loggedReason string
+	d.logFallback = func(reason, path string) { loggedReason = reason }
+
+	result := openVSCode(d, "/Users/x/dotfiles", "")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if raisedTitle != "dotfiles — main" {
+		t.Fatalf("got raised title %q, want the title fallback to have run", raisedTitle)
+	}
+	if loggedReason != "registry-empty" {
+		t.Fatalf("got logged reason %q, want registry-empty", loggedReason)
 	}
 }

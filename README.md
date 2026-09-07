@@ -208,11 +208,17 @@ a fresh one. Confirmed both empirically and in upstream reports
 [#216602](https://github.com/microsoft/vscode/issues/216602),
 [#215749](https://github.com/microsoft/vscode/issues/215749)).
 
-`mycelium.OpenVSCode` checks for an already-open window itself first,
-via each window's title over AppleScript (System Events), and only ever
-falls through to the CLI once that's ruled out — forcing a genuinely new
-window (`-n`) instead of handing `--reuse-window` a chance to guess
-wrong. That makes it safe to call repeatedly on the same
+`mycelium.OpenVSCode` checks for an already-open window itself first
+and only ever falls through to the CLI once that's ruled out — forcing
+a genuinely new window (`-n`) instead of handing `--reuse-window` a
+chance to guess wrong. Window identity comes from a per-window
+registry: every VS Code window self-registers into
+`~/.local/state/vscode-windows/` via the small
+[vscode-window-registry](vscode-window-registry/README.md) extension,
+so matching is exact folder paths and focusing is a safe
+`code --reuse-window`. The older AppleScript title matching remains as
+the fallback for when the registry cannot answer, and every fallback
+use is logged. That makes it safe to call repeatedly on the same
 never-before-seen path: the already-open check finds the window
 `OpenVSCode` itself just created on every subsequent call, so nothing
 stacks up duplicate windows.
@@ -226,8 +232,8 @@ does).
 of which VS Code windows are open, for dashboards showing per-row
 window state (the "VS Code open?" columns) rather than acting on one
 selected row. Each `IsOpen(path, branch)` runs the exact same match
-cascade `OpenVSCode` does, so the column says "open" precisely when
-Enter would focus an existing window instead of opening a new one.
+`OpenVSCode` does, so the column says "open" precisely when Enter would
+focus an existing window instead of opening a new one.
 
 ### Usage
 

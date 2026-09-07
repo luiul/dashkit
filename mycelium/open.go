@@ -3,38 +3,43 @@
 // without ever risking a duplicate window for a path that's already
 // open somewhere.
 //
-// OpenVSCode's "already open" check isn't limited to a window scoped to
-// the exact path either. path can sit *inside* a checkout rather than
-// at its root (canopy hands over the agent's cwd as-is, e.g. a monorepo
+// For VS Code, window identity comes from the window registry: every
+// window self-registers into ~/.local/state/vscode-windows/ via the
+// vscode-window-registry extension (see registry.go and dashkit's
+// top-level vscode-window-registry/ directory), so "is a window already
+// open on this path?" is answered by matching exact folder paths, and
+// focusing is `code --reuse-window <folder>`. The older AppleScript
+// title cascade remains as the fallback for when the registry cannot
+// answer (extension not installed, no window activated yet), and every
+// fallback use is logged so the fallback can be deleted once the log
+// shows it unused.
+//
+// The "already open" check isn't limited to a window scoped to the
+// exact path either. path can sit *inside* a checkout rather than at
+// its root (canopy hands over the agent's cwd as-is, e.g. a monorepo
 // package the agent runs in), so when nothing is open on path itself
-// the checkout's work-tree root gets a second exact-folder title match
-// before anything weaker runs: a window open on the root is scoped to
-// the exact tree path lives in, not merely somewhere inside it. And if
-// no window is open on either, but some other window already has a file
-// focused inside that path's git work tree (e.g. a monorepo subpackage
-// opened directly as its own window), that window is reused too rather
-// than opening a redundant new one alongside it — see
-// matchVSCodeWindowNestedPath's doc for how and why that's a
-// best-effort later check, not a guarantee, and for why the "inside"
-// test keys on git work trees rather than a raw path prefix. Callers
-// that know which branch path is on (understory always does; see
-// OpenVSCode's own doc) get two stronger matches on top: windows are
-// matched on rootName + branch together, so same-named folders on
-// different branches (the main checkout vs. a branch worktree) stop
-// being indistinguishable, and a nested window with no file focused is
-// still found by the branch in its title (see matchVSCodeWindowBranch).
+// the checkout's work-tree root gets a second exact-folder match before
+// anything weaker runs: a window open on the root is scoped to the
+// exact tree path lives in, not merely somewhere inside it. And a
+// window open on a folder nested inside path (a monorepo subpackage
+// opened directly as its own window) is reused too rather than opening
+// a redundant new one alongside it. The registry answers all three
+// stages directly from folder paths. The title fallback answers them
+// from titles and focused files instead: see findWindow,
+// matchVSCodeWindowNestedPath, and matchVSCodeWindowBranch.
 //
 // This is the underground layer shared by canopy (jump to whichever
 // window is actually running a given agent) and understory (open or
 // focus a worktree on Enter): both need the exact same "is a window
 // already open on this path? raise it — otherwise open a genuinely new
-// one" behavior, backed by the same AppleScript window detection, so it
-// lives here once instead of being duplicated in both trees.
+// one" behavior, backed by the same window detection, so it lives here
+// once instead of being duplicated in both trees.
 package mycelium
 
 import (
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // Result reports whether opening/focusing a window succeeded, and a
@@ -51,6 +56,8 @@ type Result struct {
 type deps struct {
 	lookPathCode         func() (string, bool)
 	runCommand           func(args []string) (exitOK bool, stderr string)
+	readRegistry         func() ([]registryEntry, bool)
+	logFallback          func(reason, path string)
 	vscodeWindows        func() ([]vscodeWindow, error)
 	matchWindowTitle     func(titles []string, path, branch string) (string, bool)
 	toplevel             func(dir string) string
@@ -74,6 +81,12 @@ func defaultDeps() deps {
 			err := cmd.Run()
 			return err == nil, strings.TrimSpace(stderr.String())
 		},
+		readRegistry: func() ([]registryEntry, bool) {
+			return readRegistry(registryDir(), time.Now())
+		},
+		logFallback: func(reason, path string) {
+			logRegistryFallback(registryDir(), reason, path)
+		},
 		vscodeWindows:    vscodeWindows,
 		matchWindowTitle: matchVSCodeWindowTitle,
 		toplevel:         gitToplevel,
@@ -90,14 +103,9 @@ func defaultDeps() deps {
 // OpenVSCode opens, or focuses if a window is already open on path, a VS
 // Code window there, using the real OS. branch is the branch path is
 // expected to be on, or "" when the caller doesn't know it (canopy,
-// passing a bare agent cwd): with a known branch, the window matching
-// below keys on rootName + branch together instead of on the folder
-// basename alone — this ecosystem's worktree layout gives every worktree
-// of a repo the same leaf folder name as the repo itself, so the
-// basename can never tell the main checkout apart from a branch
-// worktree, and a window open on a subpackage *inside* path with no file
-// focused is otherwise invisible to the nested-path check (see
-// matchVSCodeWindowBranch's doc).
+// passing a bare agent cwd). It is advisory: the registry path matches
+// on folder paths alone, and only the title fallback uses the branch
+// (see matchVSCodeWindowTitle).
 //
 // `code --reuse-window <path>` alone isn't enough to get real
 // switch-or-create behavior out of the `code` CLI: it only reuses the
@@ -105,26 +113,27 @@ func defaultDeps() deps {
 // silently hijacks whichever window was last active otherwise, rather
 // than opening a fresh one — confirmed both empirically and in upstream
 // reports (microsoft/vscode#121926, #216602, #215749). OpenVSCode checks
-// for an already-open window itself first, via each window's title over
-// AppleScript, and only ever falls through to the CLI once that's ruled
-// out, forcing a genuinely new window (`-n`) rather than handing
+// for an already-open window itself first, via the window registry (see
+// registry.go), and only ever falls through to the CLI once that's
+// ruled out, forcing a genuinely new window (`-n`) rather than handing
 // `--reuse-window` a chance to guess wrong. That makes it safe to call
 // repeatedly on the same never-before-seen path: the already-open check
 // finds the window OpenVSCode itself just created on every subsequent
-// call, so nothing stacks up duplicate windows.
+// call, so nothing stacks up duplicate windows. When the registry
+// cannot answer (extension not installed, no fresh entries), the older
+// AppleScript title cascade runs instead, unchanged, and the use is
+// logged (see logRegistryFallback).
 //
 // path can be a subdirectory of a checkout rather than its root (canopy
 // passes the agent's cwd as-is, e.g. a monorepo package the agent runs
 // in): when no window is open on path itself, the work-tree root gets a
-// second exact-folder title match, so a window open on the checkout as
-// a whole is still reused rather than a redundant new one opened next
+// second exact-folder match, so a window open on the checkout as a
+// whole is still reused rather than a redundant new one opened next
 // to it.
 //
 // If no window is open on path or its work-tree root, OpenVSCode also
-// checks for one open somewhere *inside* path's work tree before giving
-// up and opening a new window there — first by focused file
-// (matchVSCodeWindowNestedPath), then by the branch in the title
-// (matchVSCodeWindowBranch) — e.g. pressing Enter on a monorepo
+// checks for one open somewhere *inside* path before giving up and
+// opening a new window there — e.g. pressing Enter on a monorepo
 // worktree's root reuses a window already open on one of its
 // subpackages, rather than opening a second, redundant window on the
 // same tree.
@@ -137,6 +146,52 @@ func openVSCode(d deps, path, branch string) Result {
 		return Result{false, "No known path to open."}
 	}
 
+	// The registry is the primary source of window identity. It answers
+	// only when it holds at least one fresh entry: an empty or missing
+	// registry means the extension is not installed or no window has
+	// activated yet, and the title cascade below covers that gap.
+	entries, registryOK := d.readRegistry()
+	if registryOK && len(entries) > 0 {
+		return openVSCodeFromRegistry(d, entries, path)
+	}
+
+	reason := "registry-missing"
+	if registryOK {
+		reason = "registry-empty"
+	}
+	d.logFallback(reason, path)
+	return openVSCodeViaTitles(d, path, branch)
+}
+
+// openVSCodeFromRegistry is the primary open-or-focus path: the registry
+// says exactly which window (if any) has path open, so focusing is a
+// `code --reuse-window` aimed at the matched folder (or the window's
+// workspace file, for a multi-root window) and a miss means a genuinely
+// new window is safe. `--reuse-window`'s dangerous behavior, hijacking
+// the last-active window on a miss, cannot trigger here: the registry
+// just saw the window, fresh. The one residual race is a window closing
+// inside the staleness window between heartbeat and focus; that falls
+// through to a new window, same as a clean miss.
+func openVSCodeFromRegistry(d deps, entries []registryEntry, path string) Result {
+	codeBin, haveCode := d.lookPathCode()
+	if target, found := matchRegistry(entries, path, d.toplevel); found && haveCode {
+		if exitOK, _ := d.runCommand([]string{codeBin, "--reuse-window", target}); exitOK {
+			return Result{true, "Focused VS Code window for " + path + "."}
+		}
+	}
+	if haveCode {
+		if exitOK, _ := d.runCommand([]string{codeBin, "-n", path}); exitOK {
+			return Result{true, "Opened a new VS Code window for " + path + "."}
+		}
+	}
+	return openVSCodeAppFallback(d, path)
+}
+
+// openVSCodeViaTitles is the fallback open-or-focus path, the
+// pre-registry behavior unchanged: list windows over AppleScript, run
+// the title cascade (see findWindow), raise by exact title. Used only
+// when the registry cannot answer; every use is logged by the caller.
+func openVSCodeViaTitles(d deps, path, branch string) Result {
 	windows, windowsErr := d.vscodeWindows()
 	if windowsErr == nil {
 		if title, ok := findWindow(d, windows, path, branch); ok {
@@ -169,9 +224,13 @@ func openVSCode(d deps, path, branch string) Result {
 		}
 	}
 
-	// Fall back to just raising the app if the `code` shell command
-	// isn't installed; this can't target the right *window*, only the
-	// app.
+	return openVSCodeAppFallback(d, path)
+}
+
+// openVSCodeAppFallback is the last resort when the `code` shell command
+// isn't installed or failed: raise the app with the path. This can't
+// target the right *window*, only the app.
+func openVSCodeAppFallback(d deps, path string) Result {
 	exitOK, stderr := d.runCommand([]string{"open", "-a", "Visual Studio Code", path})
 	if exitOK {
 		return Result{true, "Opened " + path + " in VS Code (install the 'code' CLI for exact-window focus)."}
@@ -182,13 +241,16 @@ func openVSCode(d deps, path, branch string) Result {
 	return Result{false, stderr}
 }
 
-// findWindow is OpenVSCode's already-open check, extracted so
+// findWindow is the title fallback's already-open check, extracted so
 // VSCodeSnapshot.IsOpen (the read-only "is a window already open on
 // this path?" query backing the dashboards' VS Code columns) runs the
-// exact same cascade Enter's open-or-focus does: a column built on it
-// says "open" precisely when OpenVSCode would focus rather than create.
-// Returns the matching window's title, or ok=false when nothing
-// currently open matches.
+// exact same cascade Enter's open-or-focus does when both have to fall
+// back: a column built on it says "open" precisely when OpenVSCode
+// would focus rather than create. It runs only when the window
+// registry cannot answer (see openVSCode); the registry path matches
+// folder paths directly and never builds a title list. Returns the
+// matching window's title, or ok=false when nothing currently open
+// matches.
 //
 // The cascade, strongest signal first:
 //

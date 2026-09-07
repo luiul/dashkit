@@ -1,0 +1,16 @@
+{
+  "name": "vscode-window-registry",
+  "displayName": "Window Registry",
+  "description": "Writes one small JSON file per window into ~/.local/state/vscode-windows/ so external tools (dashkit/mycelium, coppice) can find and focus VS Code windows by exact folder path.",
+  "version": "0.1.0",
+  "publisher": "luiul",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js"
+}
