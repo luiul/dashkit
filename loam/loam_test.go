@@ -123,6 +123,164 @@ func TestRecolorWordSurvivesAMultiByteRuneInAnEarlierColumn(t *testing.T) {
 	}
 }
 
+func TestRecolorSegmentsStylesEachSpanWithItsOwnStyle(t *testing.T) {
+	// understory's Branch column is the model: a mismatch label
+	// ("feat @ review/") gets a plain branch name, a dim "@", and a
+	// magenta directory segment, all inside the one cell.
+	withForcedColor(t)
+	plain := lipgloss.NewStyle()
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	magenta := lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
+	off := ColOffset{Start: 0, Width: 18}
+	line := "feat @ review/    "
+	segment := func(word string) []Segment {
+		return []Segment{
+			{Text: "feat ", Style: plain},
+			{Text: "@", Style: dim},
+			{Text: " ", Style: plain},
+			{Text: "review/", Style: magenta},
+		}
+	}
+
+	got := RecolorSegments(line, off, segment)
+
+	want := plain.Render("feat ") + dim.Render("@") + plain.Render(" ") + magenta.Render("review/") + "    "
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestRecolorSegmentsLeavesTheCellAloneWhenSegmentsDoNotReassembleTheWord(t *testing.T) {
+	// A segment list whose Texts don't concatenate back to the cell's
+	// word would either shift the line's display width or restyle the
+	// wrong span; RecolorSegments must decline rather than corrupt the
+	// row.
+	withForcedColor(t)
+	off := ColOffset{Start: 0, Width: 8}
+	line := "dirty   "
+
+	got := RecolorSegments(line, off, func(string) []Segment {
+		return []Segment{{Text: "dirt", Style: lipgloss.NewStyle().Foreground(lipgloss.Color("11"))}}
+	})
+
+	if got != line {
+		t.Fatalf("got %q, want the line left unchanged", got)
+	}
+}
+
+func TestRecolorSegmentsLeavesAnEmptyWordAlone(t *testing.T) {
+	off := ColOffset{Start: 0, Width: 8}
+	line := "        "
+	segment := func(word string) []Segment {
+		t.Fatalf("segment func called for a blank cell, want the empty-word early return")
+		return nil
+	}
+	if got := RecolorSegments(line, off, segment); got != line {
+		t.Fatalf("got %q, want the blank filler line left unchanged", got)
+	}
+}
+
+func TestRecolorSegmentsANilReturnLeavesTheCellUnstyled(t *testing.T) {
+	// The pattern-match-and-decline path: understory's branchSegments
+	// returns nil for a plain branch name, and the cell must render
+	// exactly as the table drew it.
+	withForcedColor(t)
+	off := ColOffset{Start: 0, Width: 8}
+	line := "main    "
+
+	got := RecolorSegments(line, off, func(string) []Segment { return nil })
+
+	if got != line {
+		t.Fatalf("got %q, want the line left unchanged", got)
+	}
+}
+
+func TestColorizeRowsSegmentsAndWordColumnsOnOneRow(t *testing.T) {
+	// A Segment column left of two word columns: rightmost-first
+	// processing must keep every column's byte offsets valid even though
+	// the segment column's inserts shift everything to its right.
+	withForcedColor(t)
+	cols := []table.Column{
+		{Title: "Branch", Width: 16},
+		{Title: "Worktree", Width: 8},
+		{Title: "Merge", Width: 9},
+	}
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	magenta := lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
+	branchSegment := func(word string) []Segment {
+		if !strings.HasSuffix(word, "/") {
+			return nil
+		}
+		return []Segment{
+			{Text: "feat ", Style: lipgloss.NewStyle()},
+			{Text: "@", Style: dim},
+			{Text: " ", Style: lipgloss.NewStyle()},
+			{Text: "review/", Style: magenta},
+		}
+	}
+	worktreeStyles := map[string]lipgloss.Style{"dirty": lipgloss.NewStyle().Foreground(lipgloss.Color("11"))}
+	mergeStyles := map[string]lipgloss.Style{"unmerged": lipgloss.NewStyle().Foreground(lipgloss.Color("11"))}
+	tbl := newTable(cols, 3)
+	tbl.SetRows([]table.Row{{"feat @ review/", "dirty", "unmerged"}, {"main", "clean", "-"}})
+
+	got := ColorizeRows(tbl.View(), tbl.Columns(), []WordColumn{
+		{Index: 0, Segment: branchSegment},
+		{Index: 1, Style: wordStyle(worktreeStyles)},
+		{Index: 2, Style: wordStyle(mergeStyles)},
+	}, lipgloss.NewStyle())
+	lines := strings.Split(got, "\n")
+
+	for _, want := range []string{
+		dim.Render("@"), magenta.Render("review/"),
+		worktreeStyles["dirty"].Render("dirty"), mergeStyles["unmerged"].Render("unmerged"),
+	} {
+		if !strings.Contains(lines[1], want) {
+			t.Fatalf("got mismatch row %q, want it to contain %q", lines[1], want)
+		}
+	}
+	if strings.Contains(lines[2], "\x1b") {
+		t.Fatalf("got plain-branch row %q carrying ANSI, want the nil-segment row left plain", lines[2])
+	}
+}
+
+func TestColorizeRowsHighlightsASentinelTaggedRowWithSegmentsInside(t *testing.T) {
+	// The selected row can itself be a segment-styled one: the row
+	// highlight must wrap the whole line without the inner segment resets
+	// cutting it short (HighlightRow reapplies its opener after each).
+	withForcedColor(t)
+	cols := []table.Column{
+		{Title: "Updated", Width: 8},
+		{Title: "Branch", Width: 16},
+	}
+	magenta := lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
+	branchSegment := func(word string) []Segment {
+		return []Segment{
+			{Text: "feat @ ", Style: lipgloss.NewStyle()},
+			{Text: "review/", Style: magenta},
+		}
+	}
+	highlight := lipgloss.NewStyle().Background(lipgloss.AdaptiveColor{Light: "254", Dark: "237"})
+	tbl := newTable(cols, 3)
+	tbl.SetRows([]table.Row{
+		{"3d", "main"},
+		{Tag("12s", true), "feat @ review/"},
+	})
+
+	got := ColorizeRows(tbl.View(), tbl.Columns(), []WordColumn{{Index: 1, Segment: branchSegment}}, highlight)
+	lines := strings.Split(got, "\n")
+
+	open, closeSeq := StyleSequences(highlight)
+	if open == "" {
+		t.Fatal("StyleSequences returned no escape codes; withForcedColor isn't taking effect")
+	}
+	if !strings.HasPrefix(lines[2], open) || !strings.HasSuffix(lines[2], closeSeq) {
+		t.Fatalf("got tagged row %q, want it wrapped start-to-end in the highlight's open/close sequences", lines[2])
+	}
+	if want := magenta.Render("review/"); !strings.Contains(lines[2], want) {
+		t.Fatalf("got tagged row %q, want the styled segment %q to survive inside the highlight", lines[2], want)
+	}
+}
+
 func TestStyleSequencesSplitsOpenAndCloseAroundTheRenderedContent(t *testing.T) {
 	withForcedColor(t)
 	style := lipgloss.NewStyle().Reverse(true)

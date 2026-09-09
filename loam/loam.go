@@ -1,8 +1,9 @@
 // Package loam is the shared rendering substrate canopy and understory
-// both grow their bubbles/table dashboards from: per-word column
-// coloring and whole-row selection highlighting, applied by
-// post-processing an already-rendered table view rather than putting
-// ANSI-styled strings into table.Row values directly.
+// both grow their bubbles/table dashboards from: per-word (or
+// per-segment within a word) column coloring and whole-row selection
+// highlighting, applied by post-processing an already-rendered table
+// view rather than putting ANSI-styled strings into table.Row values
+// directly.
 //
 // That indirection exists because bubbles/table v1's cell truncation
 // (runewidth.Truncate) is not ANSI-aware: escape codes get counted as
@@ -67,6 +68,18 @@ func Tag(text string, selected bool) string {
 	return text
 }
 
+// Segment is one styled span of a table cell's text, as returned by a
+// WordColumn's Segment func: Text rendered in Style. The segments for
+// one cell must concatenate back to the cell's trimmed word exactly
+// (RecolorSegments checks, and leaves the cell unchanged when they
+// don't): the table's column padding was computed from that word, so a
+// segment list that adds or drops bytes would either shift the line's
+// display width or silently restyle the wrong span.
+type Segment struct {
+	Text  string
+	Style lipgloss.Style
+}
+
 // WordColumn recolors one column of an already-rendered table view: the
 // cell at Index gets Style(word) applied to it, where word is that
 // cell's own trimmed text. An empty word (a blank filler row below the
@@ -79,9 +92,17 @@ func Tag(text string, selected bool) string {
 // same regardless of its own content) — and anything in between, like a
 // closure that strips its own suffix marker before deciding the style
 // (e.g. a blinking "done*" indicator), same as any other function value.
+//
+// Segment, when set, wins over Style and splits the word into
+// individually styled spans instead of styling it whole (see
+// RecolorSegments): for a cell whose parts need different styles, like
+// understory's mismatch label ("branch @ dir/", where only the suffix
+// carries color). Leave it nil for the common whole-word case.
 type WordColumn struct {
 	Index int
 	Style func(word string) lipgloss.Style
+	// Segment, when non-nil, takes precedence over Style.
+	Segment func(word string) []Segment
 }
 
 // ColorizeRows recolors each of wordCols on an already-rendered
@@ -116,7 +137,11 @@ func ColorizeRows(view string, cols []table.Column, wordCols []WordColumn, highl
 			if wc.Index < 0 || wc.Index >= len(cols) {
 				continue
 			}
-			line = RecolorWord(line, offsets[wc.Index], wc.Style)
+			if wc.Segment != nil {
+				line = RecolorSegments(line, offsets[wc.Index], wc.Segment)
+			} else {
+				line = RecolorWord(line, offsets[wc.Index], wc.Style)
+			}
 		}
 		if isSelected {
 			line = HighlightRow(line, highlight)
@@ -231,6 +256,21 @@ func ColumnOffsets(cols []table.Column) []ColOffset {
 // cell, or a genuinely unicode name. DisplayColumnToByteOffset walks the
 // line rune-by-rune to find the real byte offsets first.
 func RecolorWord(line string, off ColOffset, lookup func(string) lipgloss.Style) string {
+	return RecolorSegments(line, off, func(word string) []Segment {
+		return []Segment{{Text: word, Style: lookup(word)}}
+	})
+}
+
+// RecolorSegments is RecolorWord's generalization to a cell whose parts
+// need different styles: segment(word) splits the span's trimmed text
+// into Segment spans, each rendered in its own Style, preserving line's
+// total length. An empty word (a blank filler row below the real data,
+// or the placeholder row) is left alone, as is any segment list whose
+// Texts don't concatenate back to the word exactly (see Segment's doc).
+// A nil return from segment leaves the cell unchanged, so a caller can
+// pattern-match the word and decline the ones that don't match (e.g.
+// understory styles only mismatch labels, not plain branch names).
+func RecolorSegments(line string, off ColOffset, segment func(word string) []Segment) string {
 	start := DisplayColumnToByteOffset(line, off.Start)
 	end := DisplayColumnToByteOffset(line, off.Start+off.Width)
 	if start >= len(line) || end > len(line) || start > end {
@@ -241,8 +281,17 @@ func RecolorWord(line string, off ColOffset, lookup func(string) lipgloss.Style)
 	if word == "" {
 		return line
 	}
+	segments := segment(word)
+	var rendered, reassembled strings.Builder
+	for _, s := range segments {
+		reassembled.WriteString(s.Text)
+		rendered.WriteString(s.Style.Render(s.Text))
+	}
+	if reassembled.String() != word {
+		return line
+	}
 	pad := strings.Repeat(" ", len(slice)-len(word))
-	return line[:start] + lookup(word).Render(word) + pad + line[end:]
+	return line[:start] + rendered.String() + pad + line[end:]
 }
 
 // DisplayColumnToByteOffset returns the byte index in line at which

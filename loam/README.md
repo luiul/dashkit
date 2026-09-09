@@ -34,7 +34,12 @@ text, and only the final display string gets colored.
   (e.g. a Since/Updated column), or do its own pre-processing first
   (e.g. strip a trailing blink-marker suffix before deciding the style)
   — it's just a `func(string) lipgloss.Style`, so any of that is a
-  caller-side closure, not something `loam` needs to know about.
+  caller-side closure, not something `loam` needs to know about. When a
+  single cell needs several styles at once (understory's mismatch
+  label, `"branch @ dir/"`, colors only the suffix), set
+  `WordColumn.Segment` instead: it splits the word into individually
+  styled `Segment` spans, and returning nil leaves the cell plain, so
+  pattern-matched rows and plain rows can share one column.
 - **`Sentinel` + `Tag`** — mark whichever row should get a full-line
   highlight by prepending a zero-width Unicode tag to any one of its
   cells (Since/Updated-style columns are a good choice: always
