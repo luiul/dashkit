@@ -43,7 +43,11 @@ type registryEntry struct {
 
 // focusTarget is what `code --reuse-window` should be handed to focus
 // this entry's window: the workspace file when the window has one (see
-// registryEntry), else the matched folder.
+// registryEntry), else the matched folder. The workspace file is the
+// only correct key (the CLI does not match a multi-root window by its
+// member folders), but aiming it at an already-open workspace is a
+// no-op that doesn't raise the window — dedup is guaranteed, the raise
+// is best-effort (see openVSCodeFromRegistry).
 func (e registryEntry) focusTarget(folder string) string {
 	if e.WorkspaceFile != "" {
 		return e.WorkspaceFile

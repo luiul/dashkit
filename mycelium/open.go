@@ -147,9 +147,26 @@ func openVSCode(d deps, path string) Result {
 // workspace file, for a multi-root window) and a miss means a genuinely
 // new window is safe. `--reuse-window`'s dangerous behavior, hijacking
 // the last-active window on a miss, cannot trigger here: the registry
-// just saw the window, fresh. The one residual race is a window closing
-// inside the staleness window between heartbeat and focus; that falls
-// through to a new window, same as a clean miss.
+// just saw the window, fresh.
+//
+// The one residual race is a window vanishing inside the staleness
+// window between heartbeat and focus, and only a crash or kill can cause
+// it: a gracefully closed window runs the extension's deactivate and
+// deletes its own entry (verified live), so the common case never
+// races. When it does happen, the stale match hands `--reuse-window` a
+// folder no window has open and the CLI hijacks the most-recent window
+// into path (observed on VS Code 1.136) instead of opening a new one.
+// The hijacked window then re-registers with path, so the next
+// OpenVSCode focuses it correctly: a one-time disruption, not a stuck
+// state.
+//
+// Multi-root windows are the one focus weakness: `--reuse-window`
+// aimed at an already-open workspace file is a no-op (verified on VS
+// Code 1.136): it neither raises the window nor opens a duplicate. The
+// match still prevents a redundant window, but the existing one may not
+// come to front. No CLI spelling raises it (`open -a` on the workspace
+// file doesn't either); raising it would take an AppleScript AXRaise by
+// window title, which the registry design deliberately dropped.
 func openVSCodeFromRegistry(d deps, entries []registryEntry, path string) Result {
 	codeBin, haveCode := d.lookPathCode()
 	if target, found := matchRegistry(entries, path, d.toplevel); found && haveCode {
