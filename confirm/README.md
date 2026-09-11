@@ -37,6 +37,12 @@ Plus two safety nets around the answer itself:
   targets against fresh data (`Refresh`): targets that vanished in the
   meantime drop out, survivors stay current, and a prompt left with
   nothing to act on closes itself rather than dangling.
+- **Every resolved prompt notifies.** A confirm ends in the action's
+  own result notification, an explicit cancel answers with "cancelled"
+  (`CancelText`), and the timeout's cancel carries its reason
+  (`TimeoutText`). A quiet cancel would read exactly like a swallowed
+  keypress: with every other key swallowed, the user could not tell
+  whether their `n` landed or the prompt is still armed.
 
 The prompt's payload — what gets acted on once confirmed — stays with
 the caller as `State`'s type parameter: understory stores a worktree
@@ -66,7 +72,7 @@ if m.prompt.Active() {
 		return m, doTheThing(p)
 	case confirm.Cancel:
 		m.prompt.Resolve()
-		return m, nil
+		return m, notify(confirm.CancelText())
 	case confirm.Quit:
 		return m, tea.Quit
 	default: // swallowed

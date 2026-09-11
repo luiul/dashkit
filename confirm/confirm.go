@@ -14,6 +14,13 @@
 // the armed prompt's targets (see Refresh), closing the prompt when
 // nothing it named still exists.
 //
+// Every resolved prompt notifies: a confirm ends in the action's own
+// result notification, an explicit cancel answers with CancelText
+// ("cancelled"), and the timeout's cancel carries its reason
+// (TimeoutText). A quiet cancel would read exactly like a swallowed
+// keypress: with every other key swallowed, the user could not tell
+// whether their n landed or the prompt is still armed.
+//
 // The prompt's payload — what actually gets acted on once confirmed —
 // stays with the caller as State's type parameter: understory stores a
 // worktree batch plus which removal kind to run, canopy a process list
@@ -133,6 +140,13 @@ func (s *State[T]) Tick(msg Msg) bool {
 // so both dashboards phrase it identically.
 func TimeoutText() string {
 	return "cancelled: no answer within " + Timeout.String()
+}
+
+// CancelText is the notification text shown when a prompt is
+// explicitly cancelled: "cancelled". It lives here, like TimeoutText,
+// so both dashboards phrase it identically.
+func CancelText() string {
+	return "cancelled"
 }
 
 func timeoutCmd(token int) tea.Cmd {

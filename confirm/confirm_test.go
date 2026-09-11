@@ -123,6 +123,12 @@ func TestTimeoutTextNamesTheTimeout(t *testing.T) {
 	}
 }
 
+func TestCancelTextIsTheSharedCancelWord(t *testing.T) {
+	if got, want := CancelText(), "cancelled"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 func TestRefreshKeepsSurvivingTargetsRestamped(t *testing.T) {
 	type target struct {
 		key   string
