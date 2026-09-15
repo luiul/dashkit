@@ -21,6 +21,7 @@ import (
 	"github.com/luiul/dashkit/loam"
 	"github.com/luiul/dashkit/mycelium"
 	"github.com/luiul/dashkit/confirm"
+	"github.com/luiul/dashkit/sieve"
 )
 ```
 
@@ -292,6 +293,21 @@ garden metaphor: the package is exactly what it says.
 
 See [confirm/README.md](confirm/README.md) for the full discipline and a
 usage walkthrough.
+
+## sieve — fuzzy row filtering
+
+The one matching rule behind both dashboards' `/` row filter, the same
+gesture jira-today's fzf picker uses: every character of the query must
+appear in order somewhere in the row's text (a subsequence match,
+case-insensitive), so `cnp` matches "canopy" without the query having
+to appear verbatim anywhere. A garden sieve separates the soil you keep
+from what you toss; this one separates matching rows from the rest.
+
+The filter *input* (the textinput, the modal `/`-entered key routing)
+stays in each app; `sieve.Match(query, cells...)` is only the shared
+"does this row match this query" answer, run against a row's plain cell
+strings, never the rendered colorized view (whose cursor sentinels and
+ANSI styling are not matchable text).
 
 ## Development
 

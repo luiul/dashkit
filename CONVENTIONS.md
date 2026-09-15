@@ -39,9 +39,19 @@ memory transfers:
   found, the minority usage moves (understory's prune moved `p` to `P`,
   copy moved `c` to `y`, vim's "yank"), the majority usage stays.
 - **Reserved and identical everywhere**: `enter` is the primary action,
-  `?` opens help, `r` refreshes, `q` quits, and `ctrl+c` always quits:
-  from the table, from a modal, from the help overlay. The simplest
-  possible invariant to state.
+  `?` opens help, `r` refreshes, `q` quits, `/` filters the rows, and
+  `ctrl+c` always quits: from the table, from a modal, from the help
+  overlay, from the filter input. The simplest possible invariant to
+  state.
+- **`/` filters the rows, identically in both apps** (see
+  [sieve](sieve/) for the matching rule): `/` focuses the filter input
+  (seeded with the applied query), typing narrows the rows, every
+  printable key is query text while the input is focused, `enter` keeps
+  its row action mid-filter, `esc` leaves the input with the filter
+  still applied, and `esc` in normal mode clears it. The semantics
+  mirror jira-today's fzf picker, except its `c`-to-clear: `c` is
+  canopy's dismiss, and the no-key-means-two-things rule above wins
+  over matching fzf exactly.
 - **Verbs stay domain-correct** rather than forced-identical: `enter` is
   "open/focus" in understory (a worktree window) and "jump" in canopy (a
   session's window); canopy's `c` is "dismiss".
