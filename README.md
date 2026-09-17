@@ -194,7 +194,7 @@ view = loam.DrawHeaderBorders(view, table.Columns(), subtleStyle)
 ## mycelium — open-or-focus a window
 
 A tiny Go library that opens, or focuses if one is already open, an app
-window (VS Code or a Ghostty terminal) on a given filesystem path —
+window (VS Code or a Ghostty terminal) on a given filesystem path,
 without ever risking a duplicate window for a path that's already open
 somewhere.
 
@@ -210,17 +210,18 @@ a fresh one. Confirmed both empirically and in upstream reports
 [#215749](https://github.com/microsoft/vscode/issues/215749)).
 
 `mycelium.OpenVSCode` checks for an already-open window itself first
-and only ever falls through to the CLI once that's ruled out — forcing
-a genuinely new window (`-n`) instead of handing `--reuse-window` a
-chance to guess wrong. Window identity comes from a per-window
-registry: every VS Code window self-registers into
-`~/.local/state/vscode-windows/` via the small
-[vscode-window-registry](vscode-window-registry/README.md) extension,
-so matching is exact folder paths and focusing is a safe
-`code --reuse-window`. That makes it safe to call repeatedly on the
-same never-before-seen path: the already-open check finds the window
-`OpenVSCode` itself just created on every subsequent call, so nothing
-stacks up duplicate windows.
+and focuses the matched window directly, so the CLI is only ever asked
+to *open*: once "no window is open on path" is established, `code -n
+path` forces a genuinely new window, and `--reuse-window` (the call
+that hijacks) is never made. Window identity is the window title: the
+dotfiles `window.title` setting renders each title as the opened
+folder's full path plus the branch, so matching is a folder-path match
+over one System Events listing, and focusing is an `AXRaise` of the
+exact window whose title matched. Identification and focus bind to the
+same window, with no intermediary re-matching. That makes it safe to
+call repeatedly on the same never-before-seen path: the already-open
+check finds the window `OpenVSCode` itself just created on every
+subsequent call, so nothing stacks up duplicate windows.
 
 `mycelium.OpenGhostty` does the equivalent for a bare Ghostty tab,
 matching by working directory (Ghostty's `tty`/`pid` AppleScript
@@ -232,7 +233,11 @@ of which VS Code windows are open, for dashboards showing per-row
 window state (the "VS Code open?" columns) rather than acting on one
 selected row. Each `IsOpen(path)` runs the exact same match
 `OpenVSCode` does, so the column says "open" precisely when Enter would
-focus an existing window instead of opening a new one.
+focus an existing window instead of opening a new one. An empty or
+failed listing while Code runs (macOS culls the accessibility tree of a
+backgrounded app) is reported by `Err()` and makes every `IsOpen`
+false, so callers render "can't tell" rather than "definitely not
+open".
 
 ### Usage
 
@@ -244,23 +249,22 @@ result := mycelium.OpenVSCode("/Users/you/code/some-repo")
 
 result = mycelium.OpenGhostty("/Users/you/code/some-repo")
 
-snapshot := mycelium.SnapshotVSCode() // one registry read per poll
+snapshot := mycelium.SnapshotVSCode() // one window listing per poll
 open := snapshot.IsOpen("/Users/you/code/some-repo")
 ```
 
-Both currently macOS-only: the VS Code side is portable (the extension
-and the reader are plain files), but Ghostty's window detection shells
-out to `osascript`, and there is no equivalent implementation for other
+Both currently macOS-only: window detection shells out to `osascript`
+on both sides, and there is no equivalent implementation for other
 platforms yet.
 
 ### Errors
 
-A failed AppleScript call (Ghostty) surfaces as `*mycelium.AutomationError`,
+A failed AppleScript call surfaces as `*mycelium.AutomationError`,
 or more specifically `*mycelium.AutomationPermissionError` when it looks
 like macOS's Automation permission for scripting the target app hasn't
 been granted yet (System Settings → Privacy & Security → Automation).
 `Result.Message` is already a human-readable rendering of either, meant
-to be shown straight to a user (e.g. as a TUI notification) — callers
+to be shown straight to a user (e.g. as a TUI notification): callers
 don't need to inspect the error types themselves unless they want to
 branch on them.
 

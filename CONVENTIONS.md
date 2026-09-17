@@ -215,18 +215,23 @@ Hard-won rendering rules, each with a bug behind it:
   syncs across instances through the filesystem
   (`~/.pi/agent/canopy-status/acks/`), within one poll interval, with
   no daemon and no locking.
-- **VS Code window identity comes from a per-window registry, not from
-  parsing window titles.** A tiny extension (dashkit's
-  `vscode-window-registry/`) runs in every window and heartbeats one
-  small JSON file per window into `~/.local/state/vscode-windows/`;
-  readers (mycelium, coppice) match by exact folder path and prune
-  entries whose heartbeat stopped. The writer must be the extension,
-  never the opening tools: a registry written by the openers misses
-  manually opened windows, the "already open?" check says no, and the
-  duplicate window this exists to prevent comes back. (The AppleScript
-  title cascade this replaced was deleted in dashkit v0.8.0 after the
-  registry proved itself; `fallback.log` in the same directory was the
-  evidence.)
+- **VS Code window identity comes from window titles, matched as
+  folder paths.** The dotfiles `window.title` setting
+  (`${rootPath}${separator}${activeRepositoryBranchName}`) puts the
+  opened folder's full path before the first ` — `, so one System
+  Events listing answers "is a window already open on this path?" by
+  exact path match, and focus is an `AXRaise` of the exact window whose
+  title matched. Identification and focus must stay bound to the same
+  window like this: any design that identifies one window and then asks
+  the `code` CLI to focus re-runs the CLI's own matching, and
+  `--reuse-window` hijacks the last-active window on any disagreement
+  (microsoft/vscode#121926; the per-window registry design died of
+  exactly that in dashkit#14). Never call `code --reuse-window`. The
+  title contract is load-bearing: it lives in the dotfiles, and the
+  branch component is never matched. And macOS culls the AX tree of a
+  backgrounded app, so on the act path an empty or matchless listing
+  while Code runs gets one activate-and-relist before a new window
+  opens (dashkit#9).
 - **Merge each fresh poll against the previous one** so a single missed
   scan doesn't flicker rows away (canopy's `internal/registry`).
 - **Every delayed self-message carries a token.** Arming or resolving
@@ -249,13 +254,15 @@ Hard-won rendering rules, each with a bug behind it:
 - **Never signal a process without re-checking its identity first**:
   pid plus lifetime from a fresh `ps` snapshot, so a recycled pid is
   never signaled by mistake (canopy's `internal/kill`).
-- **Window matching fails safe.** Identity is a folder path from the
-  window registry, so there is nothing to be ambiguous about; "inside
-  the same worktree" for the work-tree-root match is decided by `git
-  rev-parse --show-toplevel`, and nested matches respect path-element
-  boundaries (`/wt-a` never matches `/wt-a-b`). (The title-matching era
-  needed more guards: branch disambiguation, generic-branch bans,
-  ambiguity refusals. All deleted with it in v0.8.0.)
+- **Window matching fails safe.** Identity is a folder path parsed
+  from the window title, so there is nothing to be ambiguous about;
+  "inside the same worktree" for the work-tree-root match is decided
+  by `git rev-parse --show-toplevel`, and nested matches respect
+  path-element boundaries (`/wt-a` never matches `/wt-a-b`). (The old
+  basename-plus-branch title grammar needed more guards: branch
+  disambiguation, generic-branch bans, ambiguity refusals. The
+  full-path title contract deleted that class; the branch is never
+  matched, so phantom branches cannot form.)
 - **Fail loudly at startup, not silently later**: canopy checks for
   macOS and exits with a clear error anywhere else; a failed process
   scan shows a warning banner rather than looking identical to "no

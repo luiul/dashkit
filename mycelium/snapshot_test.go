@@ -1,6 +1,7 @@
 package mycelium
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -23,47 +24,68 @@ func fakeToplevel(roots ...string) func(string) string {
 	}
 }
 
-// snapshotWithEntries builds a snapshot over canned registry entries.
-func snapshotWithEntries(entries []registryEntry, toplevel func(string) string) *VSCodeSnapshot {
-	return newVSCodeSnapshot(func() ([]registryEntry, bool) { return entries, true }, toplevel)
+const testHome = "/Users/x"
+
+// snapshotWithTitles builds a snapshot over a canned window listing of
+// a running VS Code.
+func snapshotWithTitles(titles []string, toplevel func(string) string) *VSCodeSnapshot {
+	return newVSCodeSnapshot(func() ([]string, bool, error) { return titles, true, nil }, testHome, toplevel)
 }
 
 func TestSnapshotErrMeansCantTellNotClosed(t *testing.T) {
-	// An unreadable registry (extension not installed) is "can't tell":
-	// every IsOpen must answer false, the caller's "?" cell, and a wrong
-	// "open" is worse than none.
-	s := newVSCodeSnapshot(func() ([]registryEntry, bool) { return nil, false }, fakeToplevel())
+	// A failed listing (Automation permission pending, most likely) is
+	// "can't tell": every IsOpen must answer false, the caller's "?"
+	// cell, and a wrong "open" is worse than none.
+	s := newVSCodeSnapshot(func() ([]string, bool, error) {
+		return nil, false, errors.New("grant Automation permission")
+	}, testHome, fakeToplevel())
 
 	if s.Err() == nil {
-		t.Fatal("want Err non-nil for an unreadable registry")
+		t.Fatal("want Err non-nil for a failed listing")
 	}
 	if s.IsOpen("/Users/x/dotfiles") {
-		t.Fatal("IsOpen true despite an unreadable registry")
+		t.Fatal("IsOpen true despite a failed listing")
 	}
 	if s.IsOpenOnWorktree("/Users/x/dotfiles") {
-		t.Fatal("IsOpenOnWorktree true despite an unreadable registry")
+		t.Fatal("IsOpenOnWorktree true despite a failed listing")
 	}
 }
 
-func TestSnapshotEmptyRegistryIsNotAnError(t *testing.T) {
-	// VS Code simply not running (or no window with a folder open): the
-	// registry answered empty, so every IsOpen is legitimately false
-	// and Err stays nil.
-	s := snapshotWithEntries(nil, fakeToplevel())
+func TestSnapshotEmptyListingWhileRunningIsCantTell(t *testing.T) {
+	// Zero windows listed while Code runs is the AX-cull signature
+	// (luiul/dashkit#9), and a poll can't activate Code to re-check:
+	// Err, not "definitely nothing open".
+	s := snapshotWithTitles(nil, fakeToplevel())
+	if s.Err() == nil {
+		t.Fatal("want Err non-nil for an empty listing while Code runs")
+	}
+	if s.IsOpen("/Users/x/dotfiles") {
+		t.Fatal("IsOpen true on an untrustworthy listing")
+	}
+}
+
+func TestSnapshotNotRunningIsNotAnError(t *testing.T) {
+	// VS Code simply closed: nothing is open, definitively, so every
+	// IsOpen is legitimately false and Err stays nil.
+	s := newVSCodeSnapshot(func() ([]string, bool, error) { return nil, false, nil }, testHome, fakeToplevel())
 	if s.Err() != nil {
 		t.Fatalf("Err() = %v, want nil", s.Err())
 	}
 	if s.IsOpen("/Users/x/dotfiles") {
-		t.Fatal("IsOpen true with no windows open")
+		t.Fatal("IsOpen true with VS Code not running")
 	}
 }
 
-func TestSnapshotIsOpenViaTheRegistry(t *testing.T) {
-	entries := []registryEntry{
-		{SessionID: "1", Folders: []string{"/Users/x/dotfiles"}},
-		{SessionID: "2", Folders: []string{"/Users/x/tardis-community", "/Users/x/tardis-community/scm-analytics-engineers"}},
+func TestSnapshotIsOpen(t *testing.T) {
+	titles := []string{
+		"~/dotfiles — main",
+		"~/worktrees/dotfiles — feat/x",
+		"~/monorepo/packages/bar — main",
+		// Multi-root windows title on the workspace file, so they match
+		// only on that path (accepted limitation).
+		"~/tardis-community.code-workspace — main",
 	}
-	toplevel := fakeToplevel("/Users/x/dotfiles", "/Users/x/tardis-community", "/Users/x/worktrees/dotfiles")
+	toplevel := fakeToplevel("/Users/x/dotfiles", "/Users/x/worktrees/dotfiles", "/Users/x/monorepo")
 
 	cases := []struct {
 		name string
@@ -73,33 +95,35 @@ func TestSnapshotIsOpenViaTheRegistry(t *testing.T) {
 		{"exact folder", "/Users/x/dotfiles", true},
 		// Identity is the folder path: a same-named worktree elsewhere
 		// is a different path and does not match.
-		{"same-named worktree is a different path", "/Users/x/worktrees/dotfiles", false},
+		{"same-named worktree is a different path", "/Users/x/worktrees/tardis-community", false},
+		{"worktree window matched on its own path", "/Users/x/worktrees/dotfiles", true},
 		{"work-tree root for a subdirectory", "/Users/x/dotfiles/sub", true},
-		{"second folder of a multi-root window", "/Users/x/tardis-community/scm-analytics-engineers", true},
-		{"window nested inside the path", "/Users/x/tardis-community", true},
+		{"window nested inside the path", "/Users/x/monorepo", true},
+		{"multi-root window matches its workspace file path", "/Users/x/tardis-community.code-workspace", true},
+		{"multi-root member folder does not match", "/Users/x/tardis-community/scm-analytics-engineers", false},
 		{"nothing open", "/Users/x/nowhere", false},
 		{"empty path never matches", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := snapshotWithEntries(entries, toplevel).IsOpen(tc.path); got != tc.want {
+			if got := snapshotWithTitles(titles, toplevel).IsOpen(tc.path); got != tc.want {
 				t.Fatalf("IsOpen(%q) = %v, want %v", tc.path, got, tc.want)
 			}
 		})
 	}
 }
 
-func TestSnapshotIsOpenOnWorktreeViaTheRegistryIsPhantomImmune(t *testing.T) {
+func TestSnapshotIsOpenOnWorktreeIsPhantomImmune(t *testing.T) {
 	// The destructive-prompt match: strict folder identity. A window
 	// open on the main checkout whose SCM view happens to have the
-	// worktree as its active repository (the phantom that title
-	// matching could never rule out) simply is not a window on the
-	// worktree's path.
-	entries := []registryEntry{
-		{SessionID: "1", Folders: []string{"/Users/x/dotfiles"}},                 // main checkout window
-		{SessionID: "2", Folders: []string{"/Users/x/worktrees/understory/pkg"}}, // subpackage of a worktree
-		{SessionID: "3", Folders: []string{"/Users/x/worktrees/canopy"}},         // a genuine worktree window
-		{SessionID: "4", Folders: []string{"/Users/x/worktrees/canopy-sibling"}}, // prefix sibling, not nested
+	// worktree as its active repository renders the worktree's branch
+	// in its title — and still is not a window on the worktree's path,
+	// because the branch component is never matched.
+	titles := []string{
+		"~/dotfiles — feat/worktree-branch",   // main checkout, phantom branch
+		"~/worktrees/understory/pkg — feat/x", // subpackage of a worktree
+		"~/worktrees/canopy — feat/y",         // a genuine worktree window
+		"~/worktrees/canopy-sibling — feat/z", // prefix sibling, not nested
 	}
 	cases := []struct {
 		name string
@@ -108,8 +132,8 @@ func TestSnapshotIsOpenOnWorktreeViaTheRegistryIsPhantomImmune(t *testing.T) {
 	}{
 		{"window on the worktree root", "/Users/x/worktrees/canopy", true},
 		{"window on a subpackage inside the worktree", "/Users/x/worktrees/understory", true},
-		// The main checkout window does not make deleting the worktree
-		// warn.
+		// The phantom's branch component does not make deleting the
+		// worktree warn.
 		{"main checkout window is not the worktree", "/Users/x/worktrees/dotfiles", false},
 		{"sibling prefix is not inside", "/Users/x/worktrees/canopy-sibling-x", false},
 		{"unrelated path", "/Users/x/nowhere", false},
@@ -117,7 +141,7 @@ func TestSnapshotIsOpenOnWorktreeViaTheRegistryIsPhantomImmune(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := snapshotWithEntries(entries, fakeToplevel()).IsOpenOnWorktree(tc.path); got != tc.want {
+			if got := snapshotWithTitles(titles, fakeToplevel()).IsOpenOnWorktree(tc.path); got != tc.want {
 				t.Fatalf("IsOpenOnWorktree(%q) = %v, want %v", tc.path, got, tc.want)
 			}
 		})
@@ -126,19 +150,19 @@ func TestSnapshotIsOpenOnWorktreeViaTheRegistryIsPhantomImmune(t *testing.T) {
 
 // TestSnapshotAgreesWithOpenVSCode is the invariant the dashboards'
 // columns are built on: IsOpen says true exactly when OpenVSCode, given
-// the same registry entries, would focus an existing window rather than
+// the same window listing, would focus an existing window rather than
 // open a new one. Both sides run the real matcher; only the OS seams
-// (registry read, toplevel, the code CLI) are faked, and faked
+// (window listing, toplevel, raise, the code CLI) are faked, and faked
 // identically.
 func TestSnapshotAgreesWithOpenVSCode(t *testing.T) {
-	entries := []registryEntry{
-		{SessionID: "1", Folders: []string{"/Users/x/dotfiles"}},
-		{SessionID: "2", Folders: []string{"/Users/x/monorepo/packages/bar"}},
+	titles := []string{
+		"~/dotfiles — main",
+		"~/monorepo/packages/bar — main",
 	}
 	toplevel := fakeToplevel("/Users/x/dotfiles", "/Users/x/monorepo")
 
 	d := fakeDeps()
-	d.readRegistry = func() ([]registryEntry, bool) { return entries, true }
+	d.vscodeWindows = func() ([]string, bool, error) { return titles, true, nil }
 	d.toplevel = toplevel
 	openedNew := false
 	d.runCommand = func(args []string) (bool, string) {
@@ -150,7 +174,7 @@ func TestSnapshotAgreesWithOpenVSCode(t *testing.T) {
 		return true, ""
 	}
 
-	snapshot := snapshotWithEntries(entries, toplevel)
+	snapshot := snapshotWithTitles(titles, toplevel)
 
 	cases := []string{
 		"/Users/x/dotfiles",
@@ -177,8 +201,9 @@ func TestSnapshotMemoizesToplevelLookups(t *testing.T) {
 		calls[dir]++
 		return fakeToplevel("/Users/x/repo")(dir)
 	}
-	entries := []registryEntry{{SessionID: "1", Folders: []string{"/Users/x/other"}}}
-	s := newVSCodeSnapshot(func() ([]registryEntry, bool) { return entries, true }, counting)
+	s := newVSCodeSnapshot(func() ([]string, bool, error) {
+		return []string{"~/other — main"}, true, nil
+	}, testHome, counting)
 
 	// Two rows under the same root, each missing the exact match and
 	// falling through to the work-tree-root stage: every directory's

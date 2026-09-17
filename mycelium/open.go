@@ -3,23 +3,27 @@
 // without ever risking a duplicate window for a path that's already
 // open somewhere.
 //
-// For VS Code, window identity comes from the window registry: every
-// window self-registers into ~/.local/state/vscode-windows/ via the
-// vscode-window-registry extension (see registry.go and dashkit's
-// top-level vscode-window-registry/ directory), so "is a window already
-// open on this path?" is answered by matching exact folder paths, and
-// focusing is `code --reuse-window <folder>`.
+// For VS Code, window identity is the window title: the dotfiles
+// `window.title` setting renders each title as the opened folder's full
+// path plus the branch (which is never matched), so "is a window
+// already open on this path?" is a folder-path match over one System
+// Events listing, and focusing is an AXRaise of the exact window whose
+// title matched (see vscode.go). Identification and focus stay bound to
+// the same window, so nothing re-runs its own matching in between —
+// `code --reuse-window` does exactly that inside the CLI and hijacks
+// the last-active window on any disagreement, so it is never called:
+// the CLI is only ever asked to open a genuinely new window.
 //
 // The "already open" check isn't limited to a window scoped to the
 // exact path either. path can sit *inside* a checkout rather than at
 // its root (canopy hands over the agent's cwd as-is, e.g. a monorepo
 // package the agent runs in), so when nothing is open on path itself
-// the checkout's work-tree root gets a second exact-folder match before
+// the checkout's work-tree root gets a second exact-path match before
 // anything weaker runs: a window open on the root is scoped to the
 // exact tree path lives in, not merely somewhere inside it. And a
 // window open on a folder nested inside path (a monorepo subpackage
 // opened directly as its own window) is reused too rather than opening
-// a redundant new one alongside it. See matchRegistry for the three
+// a redundant new one alongside it. See matchVSCodeWindow for the three
 // stages.
 //
 // This is the underground layer shared by canopy (jump to whichever
@@ -31,9 +35,9 @@
 package mycelium
 
 import (
+	"os"
 	"os/exec"
 	"strings"
-	"time"
 )
 
 // Result reports whether opening/focusing a window succeeded, and a
@@ -50,8 +54,10 @@ type Result struct {
 type deps struct {
 	lookPathCode         func() (string, bool)
 	runCommand           func(args []string) (exitOK bool, stderr string)
-	readRegistry         func() ([]registryEntry, bool)
-	logFallback          func(reason, path string)
+	vscodeWindows        func() (titles []string, running bool, err error)
+	raiseWindow          func(title string) (bool, error)
+	activateCode         func() error
+	home                 func() string
 	toplevel             func(dir string) string
 	ghosttyFocusByCwd    func(cwd string) (bool, error)
 	ghosttyOpenNewWindow func(cwd string) error
@@ -70,11 +76,12 @@ func defaultDeps() deps {
 			err := cmd.Run()
 			return err == nil, strings.TrimSpace(stderr.String())
 		},
-		readRegistry: func() ([]registryEntry, bool) {
-			return readRegistry(registryDir(), time.Now())
-		},
-		logFallback: func(reason, path string) {
-			logRegistryFallback(registryDir(), reason, path)
+		vscodeWindows: vscodeWindows,
+		raiseWindow:   vscodeRaiseWindow,
+		activateCode:  vscodeActivateCode,
+		home: func() string {
+			h, _ := os.UserHomeDir()
+			return h
 		},
 		toplevel:             gitToplevel,
 		ghosttyFocusByCwd:    ghosttyFocusByCwd,
@@ -90,11 +97,14 @@ func defaultDeps() deps {
 // right window when one already has that exact folder open, and
 // silently hijacks whichever window was last active otherwise, rather
 // than opening a fresh one — confirmed both empirically and in upstream
-// reports (microsoft/vscode#121926, #216602, #215749). OpenVSCode checks
-// for an already-open window itself first, via the window registry (see
-// registry.go), and only ever falls through to the CLI once that's
-// ruled out, forcing a genuinely new window (`-n`) rather than handing
-// `--reuse-window` a chance to guess wrong. That makes it safe to call
+// reports (microsoft/vscode#121926, #216602, #215749). OpenVSCode
+// checks for an already-open window itself first, by matching folder
+// paths parsed out of window titles (see vscode.go), and focuses the
+// matched window directly with AXRaise: the focus action binds to the
+// identified window, with no CLI re-matching in between, so the hijack
+// class is impossible. The CLI is only ever asked to open, never to
+// reuse: once "no window is open on path" is established, `code -n
+// path` forces a genuinely new window. That makes it safe to call
 // repeatedly on the same never-before-seen path: the already-open check
 // finds the window OpenVSCode itself just created on every subsequent
 // call, so nothing stacks up duplicate windows.
@@ -102,9 +112,8 @@ func defaultDeps() deps {
 // path can be a subdirectory of a checkout rather than its root (canopy
 // passes the agent's cwd as-is, e.g. a monorepo package the agent runs
 // in): when no window is open on path itself, the work-tree root gets a
-// second exact-folder match, so a window open on the checkout as a
-// whole is still reused rather than a redundant new one opened next
-// to it.
+// second exact-path match, so a window open on the checkout as a whole
+// is still reused rather than a redundant new one opened next to it.
 //
 // If no window is open on path or its work-tree root, OpenVSCode also
 // checks for one open somewhere *inside* path before giving up and
@@ -113,12 +122,12 @@ func defaultDeps() deps {
 // subpackages, rather than opening a second, redundant window on the
 // same tree.
 //
-// When the registry cannot answer at all (the extension is not
-// installed or its directory is unreadable), there is no way to tell
-// what is open: OpenVSCode degrades to the CLI's own best-effort
-// `--reuse-window path` and logs the miss (see logRegistryFallback), so
-// a broken extension is visible rather than silently stacking
-// duplicates.
+// One listing can lie: macOS culls the AX tree of a backgrounded app,
+// so System Events can report fewer windows than exist
+// (luiul/dashkit#9). When VS Code is running but the listing comes back
+// empty or matchless, OpenVSCode activates Code (which re-materializes
+// the AX tree, and focus is moving to Code anyway) and re-lists once
+// before concluding a new window is needed.
 func OpenVSCode(path string) Result {
 	return openVSCode(defaultDeps(), path)
 }
@@ -128,53 +137,67 @@ func openVSCode(d deps, path string) Result {
 		return Result{false, "No known path to open."}
 	}
 
-	entries, registryOK := d.readRegistry()
-	if !registryOK {
-		d.logFallback("registry-missing", path)
-		if codeBin, ok := d.lookPathCode(); ok {
-			if exitOK, _ := d.runCommand([]string{codeBin, "--reuse-window", path}); exitOK {
-				return Result{true, "Opened or focused VS Code window for " + path + "."}
-			}
-		}
-		return openVSCodeAppFallback(d, path)
+	match := func(titles []string) (string, bool) {
+		return matchVSCodeWindow(parseVSCodeWindows(titles, d.home()), path, d.toplevel)
 	}
-	return openVSCodeFromRegistry(d, entries, path)
+
+	titles, running, err := d.vscodeWindows()
+	if err != nil {
+		// Can't tell what's open (the Automation permission for
+		// scripting System Events hasn't been granted, most likely):
+		// opening blind could stack the duplicate window this library
+		// exists to prevent, so fail with the actionable message
+		// instead.
+		return Result{false, err.Error()}
+	}
+	if title, found := match(titles); found {
+		return focusVSCodeWindow(d, title, path)
+	}
+
+	if running {
+		// A matchless listing may be AX culling rather than the truth
+		// (see OpenVSCode's doc). Activate Code to re-materialize the
+		// tree and re-list once. A failed activate leaves the re-list
+		// to decide on its own; a failed re-list is surfaced, same as
+		// a failed first listing.
+		_ = d.activateCode()
+		titles, _, err = d.vscodeWindows()
+		if err != nil {
+			return Result{false, err.Error()}
+		}
+		if title, found := match(titles); found {
+			return focusVSCodeWindow(d, title, path)
+		}
+	}
+
+	return openNewVSCodeWindow(d, path)
 }
 
-// openVSCodeFromRegistry is the open-or-focus path: the registry says
-// exactly which window (if any) has path open, so focusing is a
-// `code --reuse-window` aimed at the matched folder (or the window's
-// workspace file, for a multi-root window) and a miss means a genuinely
-// new window is safe. `--reuse-window`'s dangerous behavior, hijacking
-// the last-active window on a miss, cannot trigger here: the registry
-// just saw the window, fresh.
-//
-// The one residual race is a window vanishing inside the staleness
-// window between heartbeat and focus, and only a crash or kill can cause
-// it: a gracefully closed window runs the extension's deactivate and
-// deletes its own entry (verified live), so the common case never
-// races. When it does happen, the stale match hands `--reuse-window` a
-// folder no window has open and the CLI hijacks the most-recent window
-// into path (observed on VS Code 1.136) instead of opening a new one.
-// The hijacked window then re-registers with path, so the next
-// OpenVSCode focuses it correctly: a one-time disruption, not a stuck
-// state.
-//
-// Multi-root windows are the one focus weakness: `--reuse-window`
-// aimed at an already-open workspace file is a no-op (verified on VS
-// Code 1.136): it neither raises the window nor opens a duplicate. The
-// match still prevents a redundant window, but the existing one may not
-// come to front. No CLI spelling raises it (`open -a` on the workspace
-// file doesn't either); raising it would take an AppleScript AXRaise by
-// window title, which the registry design deliberately dropped.
-func openVSCodeFromRegistry(d deps, entries []registryEntry, path string) Result {
-	codeBin, haveCode := d.lookPathCode()
-	if target, found := matchRegistry(entries, path, d.toplevel); found && haveCode {
-		if exitOK, _ := d.runCommand([]string{codeBin, "--reuse-window", target}); exitOK {
-			return Result{true, "Focused VS Code window for " + path + "."}
-		}
+// focusVSCodeWindow raises the matched window by its exact title (see
+// vscodeRaiseWindow). A window that vanishes between the listing and
+// the raise falls through to a genuinely new window, same as a clean
+// miss. A raise *error* (the AX call itself failed) is surfaced rather
+// than falling through: the window is known to be open, so opening a
+// new one would stack the duplicate this library exists to prevent.
+func focusVSCodeWindow(d deps, title, path string) Result {
+	raised, err := d.raiseWindow(title)
+	if err != nil {
+		return Result{false, err.Error()}
 	}
-	if haveCode {
+	if !raised {
+		return openNewVSCodeWindow(d, path)
+	}
+	return Result{true, "Focused VS Code window for " + path + "."}
+}
+
+// openNewVSCodeWindow opens a genuinely new window on path (`-n`),
+// never `--reuse-window`: the already-open check above just ruled out
+// every existing window, and `--reuse-window` on a miss hijacks the
+// last-active window instead of opening a fresh one (see OpenVSCode's
+// doc). That call is the bug this package exists to avoid, so it is
+// never made.
+func openNewVSCodeWindow(d deps, path string) Result {
+	if codeBin, ok := d.lookPathCode(); ok {
 		if exitOK, _ := d.runCommand([]string{codeBin, "-n", path}); exitOK {
 			return Result{true, "Opened a new VS Code window for " + path + "."}
 		}
