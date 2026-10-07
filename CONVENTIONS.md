@@ -185,22 +185,17 @@ Hard-won rendering rules, each with a bug behind it:
   long) and ends with identifiers (Kind, PID, deliberately narrow);
   understory leads with identity and freshness (Repo/Branch/Created)
   and puts state (Worktree/Merge) just before the path.
-- **One flex column absorbs whatever width the terminal leaves**
-  (Location in canopy, Path in understory, both rightmost), dipping
-  below its preferred floor on a tight terminal rather than letting the
-  table overflow and clip the other columns.
-- **Every other column's floor is its widest realistic value**, so a
-  drag can truncate only the header title, never a value.
+- **One shared content-aware allocator fills the viewport** (`trellis.Allocate`). Content widths plus two padding cells per column equal the terminal width whenever the hard floors fit. Keep status, duration, resource, and numeric fields compact. Fund normal readable targets, then measured content, then weighted surplus. Canopy stretches Model and Location with equal surplus weights. Understory stretches Repo, Branch, and Path with weights 1:2:2. Weights apply only to surplus, not the whole viewport.
+- **Measure plain rendered labels from the full unfiltered row set.** Include shortened home paths, repeated repo labels, and branch mismatch suffixes. Use display cells, not bytes. Exclude ANSI, selection sentinels, and empty-state messages. Filter input must not move borders.
+- **Text shrinks before compact fields.** Normal targets can shrink to hard floors. Model content takes priority over a long path in Canopy. All columns remain visible. Below the combined hard minimum, show a terminal-too-narrow notice and keep the clipped fallback. Never report that the table fits there.
 - **A drag trades width between exactly the two columns the border
   joins**; the table's total width never changes. No distant flex
   column secretly absorbs a drag (an earlier trellis version worked
   that way; it made one column's own border stop responding while every
   other border resized that one column instead of its neighbor).
-- **A resize sticks across polls but resets on terminal resize.**
-  Widths are a live UI decision, not model data: nothing persists them.
-  The app keeps the user's overrides in its Model and reapplies them
-  when polls rebuild the columns; a terminal resize recomputes the flex
-  column from scratch anyway.
+- **Mouse preferences survive polls and terminal resizes** (`trellis.Preferences`). Capture a touched-column mask and integer desired proportions only after a changed drag motion. Keep untouched compact fields compact, preserve narrowed compact targets, and include widened compact fields in the stretch pool. Reproject and clamp hard floors without recapturing temporary narrow results. Widening restores the original proportions without drift.
+- **Automatic mode fits fresh content. Manual mode keeps chosen proportions.** After a drag, longer labels can truncate, even in an untouched stretch column. Do not silently move borders to fit new text. Preferences live in memory only. Restart returns to automatic mode. No reset key is added.
+- **Freeze geometry during a gesture.** Polls still update rows. Allocate on release or lost-button motion. A changed terminal width cancels the gesture before projection but keeps its latest preferences. Same-width and height-only updates leave widths and valid gestures unchanged.
 - **`trellis.Handle` needs the exact line index of the table's header
   row** (`originY`): count every line your `View` emits before it,
   including blank separators. An off-by-one makes every header drag
@@ -324,9 +319,7 @@ Things consciously not built, so nobody "fixes" their absence:
   duplicating it would recouple two otherwise independent tools.
 - **canopy is same-machine, same-user, macOS-only**, and keyboard-only
   (no row click; bubbles/table doesn't ship row-click handling).
-- **Column widths are never persisted**: a resize is a live UI
-  decision, and the next terminal resize recomputes the flex column
-  anyway.
+- **Column widths are never saved to disk.** Manual proportions survive terminal resizes within the running app. Restart returns to automatic sizing.
 - **No new features to fix a convention problem.** The consistency pass
   explicitly excluded adding features (a clipboard copy in canopy,
   say); conventions first, features on their own merits.

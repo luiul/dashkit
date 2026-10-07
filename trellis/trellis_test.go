@@ -366,6 +366,46 @@ func TestHandleGrabsEveryInternalBorderRegardlessOfWhichColumnUsedToBeFlex(t *te
 	}
 }
 
+func TestCancelStopsGestureWithoutApplyingStaleCoordinates(t *testing.T) {
+	m := New()
+	cols := threeCols()
+	m.Handle(press(6, 0), cols, nil, 0, 0)
+	m.Cancel()
+	widths, changed := m.Handle(motion(100, 0), cols, nil, 0, 0)
+	if m.Dragging() || changed || !equal(widths, []int{5, 5, 10}) {
+		t.Fatalf("cancelled gesture resumed: %v changed=%v", widths, changed)
+	}
+}
+
+func TestFullWidthEveryBorderTradesOnlyItsNeighbors(t *testing.T) {
+	policies := layoutPolicies()
+	widths, _ := Allocate(180, policies)
+	cols := Apply([]table.Column{{Title: "A"}, {Title: "B"}, {Title: "C"}, {Title: "D"}}, widths)
+	mins := []int{6, 8, 8, 8}
+	x := 1
+	for i := 0; i < len(cols)-1; i++ {
+		x += cols[i].Width
+		m := New()
+		m.Handle(press(x, 0), cols, mins, 0, 0)
+		got, changed := m.Handle(motion(x+1, 3), cols, mins, 0, 0)
+		if !changed || sum(got) != sum(widths) {
+			t.Fatalf("border %d did not preserve width: %v", i, got)
+		}
+		for j := range got {
+			want := widths[j]
+			if j == i {
+				want++
+			} else if j == i+1 {
+				want--
+			}
+			if got[j] != want {
+				t.Fatalf("border %d changed column %d to %d, want %d", i, j, got[j], want)
+			}
+		}
+		x += 2
+	}
+}
+
 func TestApplyReturnsACopyWithUpdatedWidths(t *testing.T) {
 	cols := threeCols()
 	out := Apply(cols, []int{1, 2, 3})

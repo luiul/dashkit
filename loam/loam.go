@@ -222,6 +222,10 @@ func DrawHeaderBorders(view string, cols []table.Column, style lipgloss.Style) s
 	return strings.Join(lines, "\n")
 }
 
+// CellPadding is the total horizontal padding of a default bubbles/table cell.
+// Layout and mouse hit testing share it so the right edge stays exact.
+const CellPadding = 2
+
 // ColOffset is a column's start position and width within a rendered
 // row line, accounting for bubbles/table's fixed 1-space padding on
 // both sides of every cell (table.DefaultStyles()'s Cell/Header
@@ -238,7 +242,7 @@ func ColumnOffsets(cols []table.Column) []ColOffset {
 	pos := 1 // leading pad of the first cell
 	for i, c := range cols {
 		offsets[i] = ColOffset{Start: pos, Width: c.Width}
-		pos += c.Width + 2 // this cell's trailing pad + the next cell's leading pad
+		pos += c.Width + CellPadding // trailing pad + the next cell's leading pad
 	}
 	return offsets
 }

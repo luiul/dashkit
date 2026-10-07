@@ -1,43 +1,10 @@
-// Package trellis is the shared mouse-driven column-resize logic canopy
-// and understory both grow their bubbles/table dashboards from: click and
-// drag a column's border to widen or narrow it, the same way a spreadsheet
-// or file manager lets you resize a column with the mouse.
+// Package trellis shares full-width column allocation and mouse resizing across
+// bubbles/table dashboards. Apps provide plain content targets and readable floors;
+// trellis owns padding accounting, weighted growth, and manual resize proportions.
 //
-// A trellis, in the garden sense, is the lattice of fixed bars a climbing
-// plant is trained against — a structure whose whole point is that its
-// grid can be adjusted without disturbing what grows on it. That's the
-// same shape as this package's one job: rearrange a bubbles/table's
-// column widths in place, in response to a mouse drag, without needing to
-// know anything about what a caller actually put in those columns.
-//
-// This is a peer to the loam package (the row/column rendering
-// substrate both dashboards already share) and the mycelium package
-// (the open-or-focus-a-window logic both dashboards' Enter key already
-// shares): the same kind of small, focused extraction, once two
-// independent trees needed the identical behavior rather than two copies
-// of it quietly drifting apart. It depends on loam for one thing only —
-// ColumnOffsets, so it doesn't need to re-derive bubbles/table's fixed
-// 1-space cell padding on its own — and is otherwise self-contained.
-//
-// Every border between two adjacent columns behaves identically: drag it
-// and those two columns trade width between themselves, nothing else
-// moves. An earlier version of this package instead routed every drag
-// through a single caller-designated "flex" column, on the idea that it
-// was the same "whatever's left over" column a caller's own terminal-
-// resize logic already computes — but that only reads as one border
-// among many when the flex column happens to be last (nothing to its
-// right, so it never has a border of its own to seem inconsistent
-// about). The moment a caller's flex column sits in the middle (more
-// columns to its right), that design meant *every* drag anywhere in the
-// table silently resized that one distant column instead of the two
-// columns actually straddling the border being dragged, and the flex
-// column's own right-hand border didn't respond to a drag at all — both
-// surprising, given every other border did respond, and both gone now
-// that a drag only ever touches its own two adjacent columns. A
-// terminal-resize-driven "give the leftover space to this one column"
-// policy is still entirely reasonable; it just isn't Handle's concern —
-// see each app's own resizeColumns/worktreeColumns for where that now
-// lives on its own, decoupled from mouse dragging entirely.
+// Every border trades width between exactly its two neighbors. Allocation is
+// separate from mouse tracking so a poll cannot move borders during a live drag.
+// Rendering and header offsets remain in loam; app labels and data stay in callers.
 package trellis
 
 import (
@@ -77,14 +44,15 @@ func (m Model) Dragging() bool {
 	return m.dragCol >= 0
 }
 
-// DragColumn returns the index of the column currently being resized, or
-// -1 if Dragging is false. A drag always changes exactly two adjacent
-// columns at once (DragColumn and DragColumn+1; see Handle's own doc),
-// so a caller that persists a resize as an override (see canopy/
-// understory's own colOverrides map) should record both of the widths
-// Handle just returned, not only the one at this index — DragColumn is
-// mostly useful for tests and diagnostics that only care which border
-// is currently being dragged.
+// Cancel ends the current gesture without changing any saved preferences.
+// Call it before projecting a changed terminal width, not for height changes.
+func (m *Model) Cancel() {
+	m.dragCol = -1
+	m.lastX = 0
+}
+
+// DragColumn returns the left neighbor of the active border, or -1 when idle.
+// Pass it to Preferences.Capture after a changed motion to mark both neighbors.
 func (m Model) DragColumn() int {
 	return m.dragCol
 }
@@ -116,14 +84,9 @@ func (m Model) DragColumn() int {
 // to its right narrows, and vice versa. That keeps the table's own
 // total width unchanged no matter which border moves, the same
 // spreadsheet-or-file-manager behavior a column border always has,
-// without singling any one column out as a dedicated sink the way an
-// earlier version of this package did — see this package's own doc for
-// why that design didn't hold up once a caller's flex column wasn't
-// also its last one. Which column (if any) absorbs the *leftover* space
-// from a terminal resize is a separate policy entirely, applied by the
-// caller outside Handle (see each app's own resizeColumns/
-// worktreeColumns); Handle only ever moves width between two adjacent
-// columns in response to a drag.
+// without singling any one column out as a dedicated sink. Allocation
+// after terminal resize is separate from this gesture. Use Allocate or
+// Preferences.Allocate outside Handle.
 func (m *Model) Handle(msg tea.MouseMsg, cols []table.Column, mins []int, originX, originY int) ([]int, bool) {
 	widths := currentWidths(cols)
 
@@ -175,7 +138,7 @@ func (m *Model) Handle(msg tea.MouseMsg, cols []table.Column, mins []int, origin
 // field (Title, ...) untouched. A convenience for the common call
 // pattern right after Handle reports a change:
 //
-//	if widths, changed := resizer.Handle(msg, cols, mins, flex, 0, originY); changed {
+//	if widths, changed := resizer.Handle(msg, cols, mins, 0, originY); changed {
 //		table.SetColumns(trellis.Apply(cols, widths))
 //	}
 func Apply(cols []table.Column, widths []int) []table.Column {
