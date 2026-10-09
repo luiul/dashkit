@@ -25,6 +25,7 @@ package loam
 import (
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/lipgloss"
@@ -296,6 +297,42 @@ func RecolorSegments(line string, off ColOffset, segment func(word string) []Seg
 	}
 	pad := strings.Repeat(" ", len(slice)-len(word))
 	return line[:start] + rendered.String() + pad + line[end:]
+}
+
+// TruncateHead trims s to width display cells keeping the TAIL, with a
+// leading "…" marking the cut — the mirror image of bubbles/table's own
+// runewidth.Truncate (which keeps the head). Path columns use this
+// because the head is the same prefix on nearly every row
+// ("~/worktrees/…") while the tail is what identifies the row. The cell
+// text must be pre-truncated to the column's current width (and rebuilt
+// on poll, resize, and drag) precisely because the table's own
+// truncation keeps the wrong end. width <= 0 means "no known width":
+// s returned unchanged. Multi-byte and double-width runes never split
+// mid-sequence.
+func TruncateHead(s string, width int) string {
+	if width <= 0 || runewidth.StringWidth(s) <= width {
+		return s
+	}
+	if width == 1 {
+		return "…"
+	}
+	return "…" + tailCells(s, width-1)
+}
+
+// tailCells returns the longest tail of s that fits width display cells,
+// walking runes from the end so no rune ever splits mid-sequence.
+func tailCells(s string, width int) string {
+	w, i := 0, len(s)
+	for i > 0 {
+		r, size := utf8.DecodeLastRuneInString(s[:i])
+		if rw := runewidth.RuneWidth(r); w+rw <= width {
+			w += rw
+			i -= size
+		} else {
+			break
+		}
+	}
+	return s[i:]
 }
 
 // DisplayColumnToByteOffset returns the byte index in line at which

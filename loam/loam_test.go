@@ -660,3 +660,28 @@ func TestHelpViewRendersTheStylesItIsGiven(t *testing.T) {
 		t.Fatalf("got %q, want the description rendered in descStyle", got)
 	}
 }
+
+func TestTruncateHeadKeepsTheTail(t *testing.T) {
+	if got := TruncateHead("short", 20); got != "short" {
+		t.Fatalf("fitting string must pass through, got %q", got)
+	}
+	if got := TruncateHead("unchanged", 0); got != "unchanged" {
+		t.Fatalf("unknown width (0) must leave the string alone, got %q", got)
+	}
+	got := TruncateHead("~/worktrees/hellofresh/speed-up-ci/global-ops", 20)
+	if !strings.HasPrefix(got, "…") || !strings.HasSuffix(got, "global-ops") {
+		t.Fatalf("truncation must keep the tail with a leading ellipsis, got %q", got)
+	}
+	if w := runewidth.StringWidth(got); w != 20 {
+		t.Fatalf("truncated width = %d, want exactly 20", w)
+	}
+	// Multi-byte, double-width runes: never split mid-sequence, never
+	// overflow the width.
+	got = TruncateHead("/Users/x/模型模型模型模型模型模型/global-ops", 20)
+	if w := runewidth.StringWidth(got); w > 20 || !strings.HasPrefix(got, "…") {
+		t.Fatalf("CJK truncation = %q (width %d)", got, w)
+	}
+	if got := TruncateHead("too-long", 1); got != "…" {
+		t.Fatalf("width 1 has room for the marker only, got %q", got)
+	}
+}

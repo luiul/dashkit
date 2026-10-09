@@ -57,6 +57,16 @@ text, and only the final display string gets colored.
   `HighlightRow` reapplies its own opening sequence right after every
   such inner reset it finds, keeping the outer style in effect up to
   the real, final close.
+- **`TruncateHead`** — trim a cell to a column's width keeping the
+  *tail*, with a leading `…`: the mirror image of bubbles/table's own
+  truncation (which keeps the head). Path columns want this because the
+  head is the same prefix on nearly every row (`~/worktrees/…`) while
+  the tail identifies the row; since the table's own truncation keeps
+  the wrong end, callers pre-truncate the cell text to the column's
+  current width and rebuild rows on poll, resize, and drag. Width
+  allocation still measures the full label, and filters still match
+  the full path. Rune-aware: multi-byte and double-width characters
+  never split mid-sequence.
 - **`ColumnOffsets` + `RecolorWord` + `DisplayColumnToByteOffset`** —
   the lower-level pieces: computing each column's start/width within a
   rendered line (accounting for bubbles/table's fixed padding), and

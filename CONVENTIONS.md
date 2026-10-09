@@ -177,6 +177,21 @@ Hard-won rendering rules, each with a bug behind it:
   the nesting hazard while giving mouse drags something visible to aim
   at.
 - **`--no-color` / `NO_COLOR` yields plain text** in both apps.
+- **Long free text that belongs to a row goes on an attached detail
+  line under it, never in a third long-text column.** bubbles/table
+  renders one line per row, so the line is injected into the already
+  rendered view: derive the visible window from the selection sentinel's
+  position (`firstVisible = cursor − sentinelLine`), never from mirrored
+  viewport scroll state; tint the line in its row's state hue without
+  bold; pad it to the table width so the row highlight spans both
+  lines; keep blink markers confined to the row's own State cell. Each
+  injected line costs real height, so the table's height budget hands
+  one row back per visible detail line (canopy's `resizeTableHeight`
+  re-measures the live window and damps down to fit). A measured
+  rejection motivates the rule (canopy#12): at 120 cells a third text
+  column next to Location and Model crushed all three to ~7 cells each
+  and still truncated the text, while a detail line shows it in full at
+  any width and costs nothing on rows without one.
 
 ## Column layout and resizing (trellis)
 
@@ -188,6 +203,7 @@ Hard-won rendering rules, each with a bug behind it:
 - **One shared content-aware allocator fills the viewport** (`trellis.Allocate`). Content widths plus two padding cells per column equal the terminal width whenever the hard floors fit. Keep status, duration, resource, and numeric fields compact. Fund normal readable targets, then measured content, then weighted surplus. Canopy stretches Model and Location with equal surplus weights. Understory stretches Repo, Branch, and Path with weights 1:2:2. Weights apply only to surplus, not the whole viewport.
 - **Measure plain rendered labels from the full unfiltered row set.** Include shortened home paths, repeated repo labels, and branch mismatch suffixes. Use display cells, not bytes. Exclude ANSI, selection sentinels, and empty-state messages. Filter input must not move borders.
 - **Text shrinks before compact fields.** Normal targets can shrink to hard floors. Model content takes priority over a long path in Canopy. All columns remain visible. Below the combined hard minimum, show a terminal-too-narrow notice and keep the clipped fallback. Never report that the table fits there.
+- **Path cells truncate keeping the tail, not the head** (`…speed-up-ci/global-ops`, not `~/worktrees/hello…`). The head is the same prefix on nearly every row (`~/worktrees/…`); the tail is what identifies the row. bubbles/table's own truncation keeps the head, so the cell text is pre-truncated to the column's current width with `loam.TruncateHead` and rebuilt on poll, resize, and drag. Width allocation still measures the full untruncated label, and filters match the full path.
 - **A drag trades width between exactly the two columns the border
   joins**; the table's total width never changes. No distant flex
   column secretly absorbs a drag (an earlier trellis version worked
@@ -319,6 +335,12 @@ Things consciously not built, so nobody "fixes" their absence:
   duplicating it would recouple two otherwise independent tools.
 - **canopy is same-machine, same-user, macOS-only**, and keyboard-only
   (no row click; bubbles/table doesn't ship row-click handling).
+- **No third long-text column in canopy's table** (a Message/Session/
+  Detail column next to Location and Model): measured with real data
+  (canopy#12), three text columns crush each other to ~7 cells at
+  120-wide terminals and still truncate the text that matters. Long
+  free text lives on the attached detail line instead (see the loam
+  section above).
 - **Column widths are never saved to disk.** Manual proportions survive terminal resizes within the running app. Restart returns to automatic sizing.
 - **No new features to fix a convention problem.** The consistency pass
   explicitly excluded adding features (a clipboard copy in canopy,
