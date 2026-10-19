@@ -13,6 +13,10 @@ on this path? raise it, otherwise open a genuinely new one" behavior,
 backed by the same window detection, so it lives here once instead of
 being duplicated in both trees.
 
+## The open-or-focus flow at a glance
+
+![Flowchart of mycelium.OpenVSCode: canopy and understory hand over a path; the library lists VS Code window titles via System Events, parses folder paths out of them, matches exact then work-tree root then nested, focuses a match with AXRaise, retries the listing once against macOS accessibility culling, and otherwise opens a genuinely new window with code -n](diagrams/open-or-focus-vscode.drawio.svg)
+
 ## Why this needs to exist at all
 
 `code --reuse-window <path>` alone isn't enough to get real
@@ -79,25 +83,42 @@ that path. And a window that just changed folders keeps its old title
 briefly; Enter during that window can open one duplicate, self
 correcting on the next title update.
 
-`mycelium.OpenGhostty` does the equivalent for a bare Ghostty tab,
-matching by working directory (Ghostty's `tty`/`pid` AppleScript
-properties don't reliably work as of Ghostty 1.3.1; working directory
-does).
+`mycelium.OpenGhostty` does the equivalent for a Ghostty window,
+matching by window title: the dotfiles zsh title hook
+(`~/.zsh_config/title.zsh`) renders every surface's title as the git
+work-tree root plus the branch, the same grammar VS Code's window.title
+renders, and the session-title pi extension re-asserts that grammar
+while a pi agent runs (pi's own "π - basename" title carries no path),
+appending the surface's tty. Titles are the strongest working identity:
+Ghostty's `tty`/`pid` AppleScript properties don't work as of Ghostty
+1.3.1, and the previous `working directory` match was weak (two
+surfaces in the same directory are indistinguishable, and a stale
+value focuses the wrong window or opens a duplicate). The tty segment
+closes the remaining ambiguity: two agents side by side in the same
+repo on the same branch have identical path components, and
+`OpenGhostty(tty, path)` raises the window whose title carries the
+caller's tty (canopy knows each agent's tty from ps). Without a tty,
+or when no tty-bearing window matches, matching falls back to the path
+alone. Accepted gap: System Events reports one title per window (its
+focused surface), so a surface in a background tab of another window
+isn't listed by its own title; a miss opens a new window, never a
+hijack.
 
-`mycelium.SnapshotVSCode` is the read-only half of all this: one
-queryable snapshot of which VS Code windows are open, for dashboards
-that want to *show* per-row window state (canopy's and understory's "VS
-Code open?" columns) rather than act on one selected row. The titles
-are listed once per snapshot, git work-tree-root lookups are memoized
-across queries, and each `IsOpen(path)` runs the exact same match
-`OpenVSCode`'s already-open check runs, so a column built on it says
-"open" precisely when Enter would focus an existing window instead of
-opening a new one. A poll never activates Code (focus isn't moving, so
-stealing it would be a bug): a failed listing, or an empty listing
-while Code runs, is reported by `Err()` and makes every `IsOpen` false,
-so callers render "can't tell" rather than "definitely not open".
-`IsOpenOnWorktree(path)` is the strict variant for destructive-action
-prompts: a pure folder-path match, phantom-immune by construction.
+`mycelium.SnapshotVSCode` and `mycelium.SnapshotGhostty` are the
+read-only half of all this: one queryable snapshot of one app's open
+windows, for dashboards that want to *show* per-row window state
+(understory's "Ghostty open?" column) rather than act on one selected
+row. The titles are listed once per snapshot, git work-tree-root
+lookups are memoized across queries, and each `IsOpen(path)` runs the
+exact same match the matching Open* function's already-open check
+runs, so a column built on it says "open" precisely when Enter would
+focus an existing window instead of opening a new one. A poll never
+activates an app (focus isn't moving, so stealing it would be a bug):
+a failed listing, or an empty listing while the app runs, is reported
+by `Err()` and makes every `IsOpen` false, so callers render "can't
+tell" rather than "definitely not open". `IsOpenOnWorktree(path)` is
+the strict variant for destructive-action prompts: a pure folder-path
+match, phantom-immune by construction.
 
 ## Usage
 
@@ -107,7 +128,8 @@ import "github.com/luiul/dashkit/mycelium"
 result := mycelium.OpenVSCode("/Users/you/code/some-repo")
 // result.OK, result.Message
 
-result = mycelium.OpenGhostty("/Users/you/code/some-repo")
+result = mycelium.OpenGhostty("ttys034", "/Users/you/code/some-repo")
+// pass "" as the tty for path-only matching
 
 // Read-only per-row queries, one window listing per poll:
 snapshot := mycelium.SnapshotVSCode()
@@ -118,9 +140,8 @@ open := snapshot.IsOpen("/Users/you/code/some-repo")
 ```
 
 Both currently macOS-only: window detection shells out to `osascript`
-(System Events for VS Code, Ghostty's own scripting bridge for
-terminals), and there is no equivalent implementation for other
-platforms yet. Scripting System Events requires macOS Automation
+(System Events for both apps), and there is no equivalent
+implementation for other platforms yet. Scripting System Events requires macOS Automation
 permission for the calling terminal (System Settings → Privacy &
 Security → Automation), so the apps embedding this need a stable
 codesign identity to keep the grant across rebuilds.

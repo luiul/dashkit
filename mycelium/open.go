@@ -14,6 +14,13 @@
 // the last-active window on any disagreement, so it is never called:
 // the CLI is only ever asked to open a genuinely new window.
 //
+// Ghostty gets the same title-based identity (see ghostty.go): the
+// dotfiles zsh title hook and the session-title pi extension render
+// each surface's title as the git work-tree root plus the branch, the
+// same grammar as VS Code's window.title, so the same listing, match
+// stages, and AXRaise apply. The branch component is never matched
+// there either.
+//
 // The "already open" check isn't limited to a window scoped to the
 // exact path either. path can sit *inside* a checkout rather than at
 // its root (canopy hands over the agent's cwd as-is, e.g. a monorepo
@@ -48,18 +55,20 @@ type Result struct {
 	Message string
 }
 
-// deps groups every external side effect OpenVSCode/OpenGhostty make, so
-// tests can swap each one out (see open_test.go) without touching the
-// real OS.
+// deps groups every external side effect OpenVSCode/OpenGhostty/
+// OpenEditor make, so tests can swap each one out (see open_test.go)
+// without touching the real OS.
 type deps struct {
 	lookPathCode         func() (string, bool)
 	runCommand           func(args []string) (exitOK bool, stderr string)
 	vscodeWindows        func() (titles []string, running bool, err error)
 	raiseWindow          func(title string) (bool, error)
 	activateCode         func() error
+	ghosttyWindows       func() (titles []string, running bool, err error)
+	raiseGhosttyWindow   func(title string) (bool, error)
+	activateGhostty      func() error
 	home                 func() string
 	toplevel             func(dir string) string
-	ghosttyFocusByCwd    func(cwd string) (bool, error)
 	ghosttyOpenNewWindow func(cwd string) error
 }
 
@@ -84,7 +93,9 @@ func defaultDeps() deps {
 			return h
 		},
 		toplevel:             gitToplevel,
-		ghosttyFocusByCwd:    ghosttyFocusByCwd,
+		ghosttyWindows:       ghosttyWindows,
+		raiseGhosttyWindow:   ghosttyRaiseWindow,
+		activateGhostty:      ghosttyActivate,
 		ghosttyOpenNewWindow: ghosttyOpenNewWindow,
 	}
 }
@@ -132,16 +143,45 @@ func OpenVSCode(path string) Result {
 	return openVSCode(defaultDeps(), path)
 }
 
-func openVSCode(d deps, path string) Result {
-	if path == "" {
-		return Result{false, "No known path to open."}
-	}
-
+// findVSCodeWindow returns the exact title of an open VS Code window
+// matched on path, strongest signal first (see matchVSCodeWindow for
+// the stages). A matchless listing while VS Code runs isn't believed:
+// macOS culls the AX tree of a backgrounded app, so Code is activated
+// (which re-materializes the tree; focus is moving toward Code anyway
+// when a window is about to be raised) and the listing re-run once
+// before concluding nothing matches.
+func findVSCodeWindow(d deps, path string) (string, bool, error) {
 	match := func(titles []string) (string, bool) {
 		return matchVSCodeWindow(parseVSCodeWindows(titles, d.home()), path, d.toplevel)
 	}
 
 	titles, running, err := d.vscodeWindows()
+	if err != nil {
+		return "", false, err
+	}
+	if title, found := match(titles); found {
+		return title, true, nil
+	}
+
+	if running {
+		_ = d.activateCode()
+		titles, _, err = d.vscodeWindows()
+		if err != nil {
+			return "", false, err
+		}
+		if title, found := match(titles); found {
+			return title, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func openVSCode(d deps, path string) Result {
+	if path == "" {
+		return Result{false, "No known path to open."}
+	}
+
+	title, found, err := findVSCodeWindow(d, path)
 	if err != nil {
 		// Can't tell what's open (the Automation permission for
 		// scripting System Events hasn't been granted, most likely):
@@ -150,24 +190,8 @@ func openVSCode(d deps, path string) Result {
 		// instead.
 		return Result{false, err.Error()}
 	}
-	if title, found := match(titles); found {
+	if found {
 		return focusVSCodeWindow(d, title, path)
-	}
-
-	if running {
-		// A matchless listing may be AX culling rather than the truth
-		// (see OpenVSCode's doc). Activate Code to re-materialize the
-		// tree and re-list once. A failed activate leaves the re-list
-		// to decide on its own; a failed re-list is surfaced, same as
-		// a failed first listing.
-		_ = d.activateCode()
-		titles, _, err = d.vscodeWindows()
-		if err != nil {
-			return Result{false, err.Error()}
-		}
-		if title, found := match(titles); found {
-			return focusVSCodeWindow(d, title, path)
-		}
 	}
 
 	return openNewVSCodeWindow(d, path)
@@ -219,31 +243,89 @@ func openVSCodeAppFallback(d deps, path string) Result {
 	return Result{false, stderr}
 }
 
-// OpenGhostty focuses a Ghostty terminal whose working directory is
-// path, bringing its window to the front, or opens a brand-new window
-// there if nothing currently open matches (e.g. that tab has since been
-// closed).
-func OpenGhostty(path string) Result {
-	return openGhostty(defaultDeps(), path)
+// OpenGhostty focuses a Ghostty window whose title names path (the
+// path itself, its git work-tree root, or a folder inside its tree —
+// the same match stages OpenVSCode runs, see matchVSCodeWindow), or
+// opens a brand-new window there when nothing open matches (e.g. that
+// window has since been closed).
+//
+// tty is the exact surface identity when the caller knows it (canopy
+// does: it resolves every agent's tty via ps): a window whose title
+// carries that tty wins over same-path windows, so two agents side by
+// side in the same location each jump to their own window. Pass "" for
+// path-only matching (understory's rows are worktrees, not agent
+// processes, so they have no tty); a tty that matches no window
+// falls back to the path match too.
+func OpenGhostty(tty, path string) Result {
+	return openGhostty(defaultDeps(), tty, path)
 }
 
-func openGhostty(d deps, path string) Result {
+func openGhostty(d deps, tty, path string) Result {
 	if path == "" {
 		return Result{false, "No known path to focus."}
 	}
 
-	found, err := d.ghosttyFocusByCwd(path)
+	title, found, err := findGhosttyWindow(d, tty, path)
 	if err != nil {
 		return Result{false, err.Error()}
 	}
 	if found {
-		return Result{true, "Focused in Ghostty."}
+		return focusGhosttyWindow(d, title, path)
+	}
+	return openNewGhosttyWindow(d, path)
+}
+
+// findGhosttyWindow is Ghostty's findVSCodeWindow: the exact title of
+// an open Ghostty window matched on path, with the same
+// activate-and-relist once against an AX-culled matchless listing
+// while Ghostty runs (luiul/dashkit#9).
+func findGhosttyWindow(d deps, tty, path string) (string, bool, error) {
+	match := func(titles []string) (string, bool) {
+		return matchGhosttyWindow(parseGhosttyWindows(titles, d.home()), path, d.toplevel, tty)
 	}
 
-	// Nothing open matches this path anymore (e.g. the tab closed since
-	// the caller last resolved it). Rather than dead-ending, create a
-	// fresh instance at the same path, mirroring OpenVSCode's
-	// reuse-or-create behavior via `-n`.
+	titles, running, err := d.ghosttyWindows()
+	if err != nil {
+		return "", false, err
+	}
+	if title, found := match(titles); found {
+		return title, true, nil
+	}
+
+	if running {
+		_ = d.activateGhostty()
+		titles, _, err = d.ghosttyWindows()
+		if err != nil {
+			return "", false, err
+		}
+		if title, found := match(titles); found {
+			return title, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// focusGhosttyWindow raises the matched window by its exact title. A
+// window that vanishes between the listing and the raise falls through
+// to a genuinely new window, same as a clean miss. A raise *error*
+// (the AX call itself failed) is surfaced rather than falling through:
+// the window is known to be open, so opening a new one would stack the
+// duplicate this library exists to prevent.
+func focusGhosttyWindow(d deps, title, path string) Result {
+	raised, err := d.raiseGhosttyWindow(title)
+	if err != nil {
+		return Result{false, err.Error()}
+	}
+	if !raised {
+		return openNewGhosttyWindow(d, path)
+	}
+	return Result{true, "Focused Ghostty window for " + path + "."}
+}
+
+// openNewGhosttyWindow opens a genuinely new window at path. The
+// already-open check above just ruled out every existing window, so
+// this can't stack a duplicate.
+func openNewGhosttyWindow(d deps, path string) Result {
 	if err := d.ghosttyOpenNewWindow(path); err != nil {
 		return Result{false, err.Error()}
 	}

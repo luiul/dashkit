@@ -21,7 +21,9 @@ func fakeDeps() deps {
 		activateCode:         func() error { return nil },
 		home:                 func() string { return "/Users/x" },
 		toplevel:             func(dir string) string { return "" },
-		ghosttyFocusByCwd:    func(cwd string) (bool, error) { return false, nil },
+		ghosttyWindows:       func() ([]string, bool, error) { return nil, false, nil },
+		raiseGhosttyWindow:   func(title string) (bool, error) { return true, nil },
+		activateGhostty:      func() error { return nil },
 		ghosttyOpenNewWindow: func(cwd string) error { return nil },
 	}
 }
@@ -319,50 +321,237 @@ func TestOpenVSCodeWithoutAPathFailsClearly(t *testing.T) {
 	}
 }
 
-func TestOpenGhosttyFocusesByCwd(t *testing.T) {
-	var gotCwd string
+func TestOpenGhosttyFocusesTheMatchedWindowByExactTitle(t *testing.T) {
+	// A window titled with the path (plus branch, never matched) is
+	// raised by its exact title, and no new window is opened.
 	d := fakeDeps()
-	d.ghosttyFocusByCwd = func(cwd string) (bool, error) { gotCwd = cwd; return true, nil }
+	d.ghosttyWindows = func() ([]string, bool, error) {
+		return []string{"~/dotfiles • main"}, true, nil
+	}
+	var gotTitle string
+	d.raiseGhosttyWindow = func(title string) (bool, error) { gotTitle = title; return true, nil }
+	openedNew := false
+	d.ghosttyOpenNewWindow = func(string) error { openedNew = true; return nil }
 
-	result := openGhostty(d, "/Users/x/dotfiles")
+	result := openGhostty(d, "", "/Users/x/dotfiles")
 
 	if !result.OK {
 		t.Fatalf("want ok, got %+v", result)
 	}
-	if gotCwd != "/Users/x/dotfiles" {
-		t.Fatalf("got cwd %q", gotCwd)
+	if gotTitle != "~/dotfiles • main" {
+		t.Fatalf("raised %q, want the exact window title", gotTitle)
+	}
+	if openedNew {
+		t.Fatal("opened a new window on a focus path")
+	}
+	if !contains(result.Message, "Focused") {
+		t.Fatalf("got message %q, want a focus confirmation", result.Message)
 	}
 }
 
-func TestOpenGhosttyWithoutAPathFailsClearly(t *testing.T) {
-	result := openGhostty(fakeDeps(), "")
-	if result.OK {
-		t.Fatalf("want not ok, got %+v", result)
-	}
-}
-
-func TestOpenGhosttyOpensNewWindowWhenNoTerminalMatches(t *testing.T) {
+func TestOpenGhosttyParsesRunningCommandAndPiTitles(t *testing.T) {
+	// The title grammar keeps the root path-bearing while a command
+	// runs ("cmd • root • branch") and while a pi session runs
+	// ("π • root • branch", set by the session-title extension): both
+	// must match the path the same way the idle title does.
 	d := fakeDeps()
-	d.ghosttyFocusByCwd = func(string) (bool, error) { return false, nil }
+	d.ghosttyWindows = func() ([]string, bool, error) {
+		return []string{"go test • ~/dashkit • fix/x", "π • ~/worktrees/canopy • feat/y"}, true, nil
+	}
+	var raised []string
+	d.raiseGhosttyWindow = func(title string) (bool, error) { raised = append(raised, title); return true, nil }
+
+	if result := openGhostty(d, "", "/Users/x/dashkit"); !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if result := openGhostty(d, "", "/Users/x/worktrees/canopy"); !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	want := []string{"go test • ~/dashkit • fix/x", "π • ~/worktrees/canopy • feat/y"}
+	if !slices.Equal(raised, want) {
+		t.Fatalf("raised %v, want %v", raised, want)
+	}
+}
+
+func TestOpenGhosttyUnparseableTitleNeverMatches(t *testing.T) {
+	// pi's own title ("π - basename", no path) cannot identify a
+	// window: it must not match, so the call opens a new window rather
+	// than focusing a guess.
+	d := fakeDeps()
+	d.ghosttyWindows = func() ([]string, bool, error) {
+		return []string{"π - dotfiles"}, true, nil
+	}
+	raised := false
+	d.raiseGhosttyWindow = func(string) (bool, error) { raised = true; return true, nil }
 	var gotCwd string
 	d.ghosttyOpenNewWindow = func(cwd string) error { gotCwd = cwd; return nil }
 
-	result := openGhostty(d, "/Users/x/dotfiles")
+	result := openGhostty(d, "", "/Users/x/dotfiles")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if raised {
+		t.Fatal("focused a window identified by basename only")
+	}
+	if gotCwd != "/Users/x/dotfiles" {
+		t.Fatalf("opened new window at %q", gotCwd)
+	}
+}
+
+func TestOpenGhosttyWorkTreeRootStage(t *testing.T) {
+	// The agent's cwd can be a subdirectory: a window titled with the
+	// work-tree root still matches, exactly as on the VS Code path.
+	d := fakeDeps()
+	d.ghosttyWindows = func() ([]string, bool, error) {
+		return []string{"~/dotfiles • main"}, true, nil
+	}
+	d.toplevel = func(dir string) string { return "/Users/x/dotfiles" }
+	var gotTitle string
+	d.raiseGhosttyWindow = func(title string) (bool, error) { gotTitle = title; return true, nil }
+
+	result := openGhostty(d, "", "/Users/x/dotfiles/sub")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if gotTitle != "~/dotfiles • main" {
+		t.Fatalf("raised %q, want the work-tree root window", gotTitle)
+	}
+}
+
+func TestOpenGhosttyMatchlessListingActivatesAndRelistsOnce(t *testing.T) {
+	// Same AX-cull self-heal as the VS Code path (luiul/dashkit#9): a
+	// matchless listing while Ghostty runs gets one activate-and-relist
+	// before a new window is allowed.
+	d := fakeDeps()
+	listCalls := 0
+	d.ghosttyWindows = func() ([]string, bool, error) {
+		listCalls++
+		if listCalls == 1 {
+			return []string{"~/canopy • main"}, true, nil
+		}
+		return []string{"~/canopy • main", "~/dotfiles • main"}, true, nil
+	}
+	activations := 0
+	d.activateGhostty = func() error { activations++; return nil }
+	var gotTitle string
+	d.raiseGhosttyWindow = func(title string) (bool, error) { gotTitle = title; return true, nil }
+
+	result := openGhostty(d, "", "/Users/x/dotfiles")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if listCalls != 2 {
+		t.Fatalf("listed %d times, want exactly 2 (one re-list)", listCalls)
+	}
+	if activations != 1 {
+		t.Fatalf("activated %d times, want 1", activations)
+	}
+	if gotTitle != "~/dotfiles • main" {
+		t.Fatalf("raised %q, want the re-listed window's title", gotTitle)
+	}
+}
+
+func TestOpenGhosttyNotRunningOpensNewWindowWithoutRelisting(t *testing.T) {
+	// Ghostty closed is a definitive nothing-open: no activate, no
+	// re-list, straight to a new window.
+	d := fakeDeps()
+	listCalls := 0
+	d.ghosttyWindows = func() ([]string, bool, error) { listCalls++; return nil, false, nil }
+	activated := false
+	d.activateGhostty = func() error { activated = true; return nil }
+	var gotCwd string
+	d.ghosttyOpenNewWindow = func(cwd string) error { gotCwd = cwd; return nil }
+
+	result := openGhostty(d, "", "/Users/x/dotfiles")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if listCalls != 1 {
+		t.Fatalf("listed %d times, want 1", listCalls)
+	}
+	if activated {
+		t.Fatal("activated Ghostty even though it isn't running")
+	}
+	if gotCwd != "/Users/x/dotfiles" {
+		t.Fatalf("opened new window at %q", gotCwd)
+	}
+}
+
+func TestOpenGhosttyVanishedMatchOpensANewWindow(t *testing.T) {
+	// The matched window closed between listing and raise (raise
+	// answers false): fall through to a genuinely new window.
+	d := fakeDeps()
+	d.ghosttyWindows = func() ([]string, bool, error) {
+		return []string{"~/dotfiles • main"}, true, nil
+	}
+	d.raiseGhosttyWindow = func(string) (bool, error) { return false, nil }
+	var gotCwd string
+	d.ghosttyOpenNewWindow = func(cwd string) error { gotCwd = cwd; return nil }
+
+	result := openGhostty(d, "", "/Users/x/dotfiles")
 
 	if !result.OK {
 		t.Fatalf("want ok, got %+v", result)
 	}
 	if gotCwd != "/Users/x/dotfiles" {
-		t.Fatalf("got cwd %q", gotCwd)
+		t.Fatalf("opened new window at %q", gotCwd)
+	}
+}
+
+func TestOpenGhosttyRaiseErrorSurfacesAndOpensNothing(t *testing.T) {
+	// The matched window is known to be open; if raising it fails,
+	// opening a new window would stack a duplicate. Surface the error.
+	d := fakeDeps()
+	d.ghosttyWindows = func() ([]string, bool, error) {
+		return []string{"~/dotfiles • main"}, true, nil
+	}
+	d.raiseGhosttyWindow = func(string) (bool, error) { return false, errors.New("AXRaise failed") }
+	openedNew := false
+	d.ghosttyOpenNewWindow = func(string) error { openedNew = true; return nil }
+
+	result := openGhostty(d, "", "/Users/x/dotfiles")
+
+	if result.OK {
+		t.Fatalf("want not ok, got %+v", result)
+	}
+	if !contains(result.Message, "AXRaise failed") {
+		t.Fatalf("got message %q", result.Message)
+	}
+	if openedNew {
+		t.Fatal("opened a duplicate next to a window that merely failed to raise")
+	}
+}
+
+func TestOpenGhosttyListingErrorSurfacesAndOpensNothing(t *testing.T) {
+	d := fakeDeps()
+	d.ghosttyWindows = func() ([]string, bool, error) {
+		return nil, false, errors.New("grant Automation permission")
+	}
+	openedNew := false
+	d.ghosttyOpenNewWindow = func(string) error { openedNew = true; return nil }
+
+	result := openGhostty(d, "", "/Users/x/dotfiles")
+
+	if result.OK {
+		t.Fatalf("want not ok, got %+v", result)
+	}
+	if !contains(result.Message, "Automation permission") {
+		t.Fatalf("got message %q", result.Message)
+	}
+	if openedNew {
+		t.Fatal("opened a window even though the already-open check couldn't run")
 	}
 }
 
 func TestOpenGhosttyFailsClearlyWhenNewWindowFails(t *testing.T) {
 	d := fakeDeps()
-	d.ghosttyFocusByCwd = func(string) (bool, error) { return false, nil }
 	d.ghosttyOpenNewWindow = func(string) error { return errors.New("couldn't open a new window") }
 
-	result := openGhostty(d, "/Users/x/dotfiles")
+	result := openGhostty(d, "", "/Users/x/dotfiles")
 
 	if result.OK {
 		t.Fatalf("want not ok, got %+v", result)
@@ -372,16 +561,81 @@ func TestOpenGhosttyFailsClearlyWhenNewWindowFails(t *testing.T) {
 	}
 }
 
-func TestOpenGhosttySurfacesAutomationPermissionErrors(t *testing.T) {
-	d := fakeDeps()
-	d.ghosttyFocusByCwd = func(string) (bool, error) { return false, errors.New("grant Automation permission") }
-
-	result := openGhostty(d, "/Users/x/dotfiles")
-
+func TestOpenGhosttyWithoutAPathFailsClearly(t *testing.T) {
+	result := openGhostty(fakeDeps(), "", "")
 	if result.OK {
 		t.Fatalf("want not ok, got %+v", result)
 	}
-	if !contains(result.Message, "Automation permission") {
-		t.Fatalf("got message %q", result.Message)
+	if !contains(result.Message, "path") {
+		t.Fatalf("got message %q, want it to mention path", result.Message)
+	}
+}
+
+func TestOpenGhosttyPrefersTheTtyMatchedWindow(t *testing.T) {
+	// Two agents side by side in the same repo on the same branch: the
+	// titles differ only by the tty segment, and the tty identifies the
+	// exact window. The path match alone can't pick between them.
+	d := fakeDeps()
+	d.ghosttyWindows = func() ([]string, bool, error) {
+		return []string{
+			"π • ~/dotfiles • main • ttys001",
+			"π • ~/dotfiles • main • ttys002",
+		}, true, nil
+	}
+	var gotTitle string
+	d.raiseGhosttyWindow = func(title string) (bool, error) { gotTitle = title; return true, nil }
+
+	result := openGhostty(d, "ttys002", "/Users/x/dotfiles")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if gotTitle != "π • ~/dotfiles • main • ttys002" {
+		t.Fatalf("raised %q, want the tty-matched window", gotTitle)
+	}
+}
+
+func TestOpenGhosttyTtyMatchRequiresThePathToMatch(t *testing.T) {
+	// A tty match whose window path doesn't match is ignored (a recycled
+	// tty name must not focus an unrelated window): the call falls back
+	// to the plain path match instead.
+	d := fakeDeps()
+	d.ghosttyWindows = func() ([]string, bool, error) {
+		return []string{
+			"π • ~/canopy • main • ttys002",
+			"π • ~/dotfiles • main",
+		}, true, nil
+	}
+	var gotTitle string
+	d.raiseGhosttyWindow = func(title string) (bool, error) { gotTitle = title; return true, nil }
+
+	result := openGhostty(d, "ttys002", "/Users/x/dotfiles")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if gotTitle != "π • ~/dotfiles • main" {
+		t.Fatalf("raised %q, want the path-matched window", gotTitle)
+	}
+}
+
+func TestOpenGhosttyUnknownTtyFallsBackToPathMatch(t *testing.T) {
+	// No window carries the tty (the agent predates the session-title
+	// extension, or the extension couldn't resolve it): the same-path
+	// window is focused rather than opening a duplicate.
+	d := fakeDeps()
+	d.ghosttyWindows = func() ([]string, bool, error) {
+		return []string{"~/dotfiles • main"}, true, nil
+	}
+	var gotTitle string
+	d.raiseGhosttyWindow = func(title string) (bool, error) { gotTitle = title; return true, nil }
+
+	result := openGhostty(d, "ttys009", "/Users/x/dotfiles")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if gotTitle != "~/dotfiles • main" {
+		t.Fatalf("raised %q, want the path-matched window", gotTitle)
 	}
 }

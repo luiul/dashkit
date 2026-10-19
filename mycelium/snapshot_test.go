@@ -26,19 +26,25 @@ func fakeToplevel(roots ...string) func(string) string {
 
 const testHome = "/Users/x"
 
-// snapshotWithTitles builds a snapshot over a canned window listing of
-// a running VS Code.
-func snapshotWithTitles(titles []string, toplevel func(string) string) *VSCodeSnapshot {
-	return newVSCodeSnapshot(func() ([]string, bool, error) { return titles, true, nil }, testHome, toplevel)
+// snapshotWithTitles builds a VS Code snapshot over a canned window
+// listing of a running VS Code.
+func snapshotWithTitles(titles []string, toplevel func(string) string) *WindowSnapshot {
+	return newWindowSnapshot(func() ([]string, bool, error) { return titles, true, nil }, parseVSCodeWindows, "vscode", testHome, toplevel)
+}
+
+// ghosttySnapshotWithTitles builds a Ghostty snapshot over a canned
+// window listing of a running Ghostty.
+func ghosttySnapshotWithTitles(titles []string, toplevel func(string) string) *WindowSnapshot {
+	return newWindowSnapshot(func() ([]string, bool, error) { return titles, true, nil }, parseGhosttyWindows, "ghostty", testHome, toplevel)
 }
 
 func TestSnapshotErrMeansCantTellNotClosed(t *testing.T) {
 	// A failed listing (Automation permission pending, most likely) is
 	// "can't tell": every IsOpen must answer false, the caller's "?"
 	// cell, and a wrong "open" is worse than none.
-	s := newVSCodeSnapshot(func() ([]string, bool, error) {
+	s := newWindowSnapshot(func() ([]string, bool, error) {
 		return nil, false, errors.New("grant Automation permission")
-	}, testHome, fakeToplevel())
+	}, parseVSCodeWindows, "vscode", testHome, fakeToplevel())
 
 	if s.Err() == nil {
 		t.Fatal("want Err non-nil for a failed listing")
@@ -67,7 +73,7 @@ func TestSnapshotEmptyListingWhileRunningIsCantTell(t *testing.T) {
 func TestSnapshotNotRunningIsNotAnError(t *testing.T) {
 	// VS Code simply closed: nothing is open, definitively, so every
 	// IsOpen is legitimately false and Err stays nil.
-	s := newVSCodeSnapshot(func() ([]string, bool, error) { return nil, false, nil }, testHome, fakeToplevel())
+	s := newWindowSnapshot(func() ([]string, bool, error) { return nil, false, nil }, parseVSCodeWindows, "vscode", testHome, fakeToplevel())
 	if s.Err() != nil {
 		t.Fatalf("Err() = %v, want nil", s.Err())
 	}
@@ -201,9 +207,9 @@ func TestSnapshotMemoizesToplevelLookups(t *testing.T) {
 		calls[dir]++
 		return fakeToplevel("/Users/x/repo")(dir)
 	}
-	s := newVSCodeSnapshot(func() ([]string, bool, error) {
+	s := newWindowSnapshot(func() ([]string, bool, error) {
 		return []string{"~/other — main"}, true, nil
-	}, testHome, counting)
+	}, parseVSCodeWindows, "vscode", testHome, counting)
 
 	// Two rows under the same root, each missing the exact match and
 	// falling through to the work-tree-root stage: every directory's
@@ -215,5 +221,68 @@ func TestSnapshotMemoizesToplevelLookups(t *testing.T) {
 		if n > 1 {
 			t.Fatalf("toplevel(%q) called %d times, want 1", dir, n)
 		}
+	}
+}
+
+// TestSnapshotAgreesWithOpenGhostty is the column's invariant: IsOpen
+// says true exactly when OpenGhostty, given the same window listing,
+// would focus an existing window rather than open a new one. Only the
+// OS seams are faked, identically on both sides.
+func TestSnapshotAgreesWithOpenGhostty(t *testing.T) {
+	titles := []string{
+		"~/dotfiles • main",
+		"π • ~/worktrees/canopy • feat/y • ttys004",
+	}
+	toplevel := fakeToplevel("/Users/x/worktrees/canopy")
+
+	d := fakeDeps()
+	d.ghosttyWindows = func() ([]string, bool, error) { return titles, true, nil }
+	d.toplevel = toplevel
+	openedNew := false
+	d.ghosttyOpenNewWindow = func(string) error { openedNew = true; return nil }
+
+	s := newWindowSnapshot(
+		func() ([]string, bool, error) { return titles, true, nil },
+		parseGhosttyWindows, "ghostty", testHome, toplevel,
+	)
+
+	cases := []string{
+		"/Users/x/dotfiles",
+		"/Users/x/dotfiles/sub",
+		"/Users/x/worktrees/canopy",
+		"/Users/x/nowhere",
+	}
+	for _, path := range cases {
+		openedNew = false
+		result := openGhostty(d, "", path)
+		if !result.OK {
+			t.Fatalf("openGhostty(%q) failed: %+v", path, result)
+		}
+		wouldFocus := !openedNew
+		if got := s.IsOpen(path); got != wouldFocus {
+			t.Fatalf("IsOpen(%q) = %v, but OpenGhostty wouldFocus = %v", path, got, wouldFocus)
+		}
+	}
+}
+
+// TestGhosttySnapshotMatchesGhosttyTitles pins the Ghostty title grammar
+// end to end: a pi-session title ("π • root • branch") and a
+// running-command title ("cmd • root • branch") both resolve the root,
+// so a poll's open column sees agent windows at a plain prompt and
+// mid-run alike.
+func TestGhosttySnapshotMatchesGhosttyTitles(t *testing.T) {
+	titles := []string{
+		"~/dotfiles • main",               // zsh hook, idle prompt
+		"go test • ~/dashkit • fix/x",     // zsh hook, command running
+		"π • ~/worktrees/canopy • feat/y", // pi session (session-title extension)
+	}
+	s := ghosttySnapshotWithTitles(titles, fakeToplevel("/Users/x/worktrees/canopy"))
+	for _, path := range []string{"/Users/x/dotfiles", "/Users/x/dashkit", "/Users/x/worktrees/canopy"} {
+		if !s.IsOpen(path) {
+			t.Fatalf("IsOpen(%q) false, want true", path)
+		}
+	}
+	if s.IsOpen("/Users/x/nowhere") {
+		t.Fatal("IsOpen true for an unopened path")
 	}
 }
