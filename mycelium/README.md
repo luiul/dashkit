@@ -17,6 +17,8 @@ being duplicated in both trees.
 
 ![Flowchart of mycelium.OpenVSCode: canopy and understory hand over a path; the library lists VS Code window titles via System Events, parses folder paths out of them, matches exact then work-tree root then nested, focuses a match with AXRaise, retries the listing once against macOS accessibility culling, and otherwise opens a genuinely new window with code -n](diagrams/open-or-focus-vscode.drawio.svg)
 
+*Drawn at v0.12. Since v0.15, understory's Enter goes through the Ghostty path instead, which mirrors this exact flow with title-based window identity (see ghostty.go); OpenVSCode's remaining consumer is canopy's VS Code-surfaced rows.*
+
 ## Why this needs to exist at all
 
 `code --reuse-window <path>` alone isn't enough to get real
