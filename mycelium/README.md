@@ -15,7 +15,7 @@ being duplicated in both trees.
 
 ## The open-or-focus flow at a glance
 
-![Flowchart of mycelium's title-based open-or-focus, shared by VS Code and Ghostty: canopy and understory hand over a path (and a tty for Ghostty-surfaced agents); the library lists window titles per app via System Events, parses the work-tree root out of each title, prefers a tty-bearing window when the caller knows one and then matches exact, work-tree root, and nested; focuses a match with AXRaise, retries the listing once against macOS accessibility culling, and otherwise opens a genuinely new window](diagrams/open-or-focus.drawio.svg)
+![Flowchart of mycelium's title-based open-or-focus, shared by VS Code and Ghostty: canopy and understory hand over a path (and a tty for Ghostty-surfaced agents); the library lists window titles per app via System Events, parses the work-tree root out of each title, prefers a tty-bearing window when the caller knows one and then matches exact, work-tree root, nested, and (Ghostty only) the visible tail of a head-truncated title; focuses a match with AXRaise, retries the listing once against macOS accessibility culling, and otherwise opens a genuinely new window](diagrams/open-or-focus.drawio.svg)
 
 ## Why this needs to exist at all
 
@@ -51,7 +51,7 @@ grammar (a main-checkout window whose SCM view activated a worktree's
 repo) is impossible by construction. The setting is a load-bearing
 dependency, not cosmetic.
 
-Matching runs three stages, strongest signal first:
+Matching runs stages, strongest signal first:
 
 1. **Exact**: a window's title path is path itself.
 2. **Work-tree root**: a window's title path is the root of path's git
@@ -61,6 +61,16 @@ Matching runs three stages, strongest signal first:
 3. **Nested**: a window's title path sits inside path, on a path
    element boundary (`/wt-a` never matches `/wt-a-b`). This is the
    "window open on a subpackage of the worktree" case.
+4. **Truncated tail** (Ghostty only): a title longer than its window
+   is head-truncated by the titlebar with a leading `…`
+   (`…/hellofresh/review-zau/global-ops` for a window on
+   `~/worktrees/hellofresh/review-zau/global-ops`), and both System
+   Events and Ghostty's own AppleScript report only the truncated
+   label. The window is kept with its visible tail and matches when
+   path ends with it (a mid-component cut retries from the tail's
+   first separator). Lowest priority on purpose: it is the only stage
+   that guesses, so a full-path window always wins and a fragment with
+   no element boundary left never matches.
 
 Focus is then an `AXRaise` of the exact window whose title matched
 (activating the app first, since a window can't be raised above other
@@ -102,7 +112,10 @@ or when no tty-bearing window matches, matching falls back to the path
 alone. Accepted gap: System Events reports one title per window (its
 focused surface), so a surface in a background tab of another window
 isn't listed by its own title; a miss opens a new window, never a
-hijack.
+hijack. A title too long for its window is head-truncated by the
+titlebar with a leading `…`; such windows match by their visible tail
+(stage 4 above), because without it a narrow window on a long worktree
+path would be invisible to the matcher entirely.
 
 `mycelium.SnapshotVSCode` and `mycelium.SnapshotGhostty` are the
 read-only half of all this: one queryable snapshot of one app's open

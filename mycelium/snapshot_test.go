@@ -286,3 +286,40 @@ func TestGhosttySnapshotMatchesGhosttyTitles(t *testing.T) {
 		t.Fatal("IsOpen true for an unopened path")
 	}
 }
+
+// TestGhosttySnapshotMatchesTruncatedTitles pins the narrow-window
+// case end to end: a title head-truncated by the titlebar (leading …)
+// keeps its window in the snapshot and IsOpen answers true for the
+// worktree whose path ends with the visible tail — the column's
+// "open" must agree with OpenGhostty's focus on the same listing.
+// A too-weak tail and a non-matching sibling stay false.
+func TestGhosttySnapshotMatchesTruncatedTitles(t *testing.T) {
+	titles := []string{
+		"…/hellofresh/review-zau/global-ops", // narrow window, head-truncated
+	}
+	s := ghosttySnapshotWithTitles(titles, fakeToplevel())
+
+	want := "/Users/x/worktrees/hellofresh/review-zau/global-ops"
+	if !s.IsOpen(want) {
+		t.Fatalf("IsOpen(%q) false, want true", want)
+	}
+	if s.IsOpen(want + "-2") {
+		t.Fatal("IsOpen true for a sibling path that doesn't share the tail")
+	}
+	if s.IsOpenOnWorktree(want) {
+		t.Fatal("IsOpenOnWorktree true on a truncated window: the strict match must stay conservative")
+	}
+}
+
+// TestGhosttySnapshotDropsTooWeakTruncatedTitles pins the guard: a
+// truncation whose visible path part carries no separator is not
+// kept as a matchable window at all — erring toward "not open"
+// rather than a guess.
+func TestGhosttySnapshotDropsTooWeakTruncatedTitles(t *testing.T) {
+	s := ghosttySnapshotWithTitles([]string{"…global-ops", "… • main • ttys004"}, fakeToplevel())
+
+	want := "/Users/x/worktrees/hellofresh/review-zau/global-ops"
+	if s.IsOpen(want) {
+		t.Fatal("IsOpen true on a tail with no element boundary")
+	}
+}

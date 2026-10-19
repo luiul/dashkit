@@ -420,6 +420,119 @@ func TestOpenGhosttyWorkTreeRootStage(t *testing.T) {
 	}
 }
 
+func TestOpenGhosttyTruncatedTitleMatchesByTail(t *testing.T) {
+	// A narrow window truncates a long title from the left
+	// ("…/hellofresh/review-zau/global-ops" for a window on
+	// ~/worktrees/hellofresh/review-zau/global-ops): the visible tail
+	// still identifies the window, so the call focuses it rather than
+	// opening a duplicate. A sibling path that doesn't share the tail
+	// still gets a new window.
+	d := fakeDeps()
+	d.ghosttyWindows = func() ([]string, bool, error) {
+		return []string{"…/hellofresh/review-zau/global-ops"}, true, nil
+	}
+	var gotTitle string
+	d.raiseGhosttyWindow = func(title string) (bool, error) { gotTitle = title; return true, nil }
+	var gotCwd string
+	d.ghosttyOpenNewWindow = func(cwd string) error { gotCwd = cwd; return nil }
+
+	result := openGhostty(d, "", "/Users/x/worktrees/hellofresh/review-zau/global-ops")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if gotTitle != "…/hellofresh/review-zau/global-ops" {
+		t.Fatalf("raised %q, want the truncated window", gotTitle)
+	}
+	if gotCwd != "" {
+		t.Fatalf("opened a new window at %q although the truncated window matches", gotCwd)
+	}
+
+	gotTitle = ""
+	result = openGhostty(d, "", "/Users/x/worktrees/hellofresh/review-zau/global-ops-2")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if gotTitle != "" {
+		t.Fatalf("raised %q for a sibling path, want no match", gotTitle)
+	}
+	if gotCwd != "/Users/x/worktrees/hellofresh/review-zau/global-ops-2" {
+		t.Fatalf("opened new window at %q, want the sibling path", gotCwd)
+	}
+}
+
+func TestOpenGhosttyTruncatedTitleMidComponentCut(t *testing.T) {
+	// The truncation cut can land inside a directory name
+	// ("…fresh/review-zau/global-ops" for "…/hellofresh/
+	// review-zau/global-ops"): the match retries from the tail's first
+	// separator, which restores the element boundary.
+	d := fakeDeps()
+	d.ghosttyWindows = func() ([]string, bool, error) {
+		return []string{"…fresh/review-zau/global-ops"}, true, nil
+	}
+	raised := false
+	d.raiseGhosttyWindow = func(string) (bool, error) { raised = true; return true, nil }
+
+	result := openGhostty(d, "", "/Users/x/worktrees/hellofresh/review-zau/global-ops")
+
+	if !result.OK || !raised {
+		t.Fatalf("want the truncated window focused, got %+v raised=%v", result, raised)
+	}
+}
+
+func TestOpenGhosttyTruncatedTailTooWeakNeverMatches(t *testing.T) {
+	// A fragment with no element boundary left ("…global-ops", a cut
+	// that consumed every separator) is too weak to anchor a match:
+	// opening a new window beats focusing a guess. So is a truncation
+	// that left only non-path segments ("… • main • ttys004").
+	d := fakeDeps()
+	d.ghosttyWindows = func() ([]string, bool, error) {
+		return []string{"…global-ops", "… • main • ttys004"}, true, nil
+	}
+	raised := false
+	d.raiseGhosttyWindow = func(string) (bool, error) { raised = true; return true, nil }
+	var gotCwd string
+	d.ghosttyOpenNewWindow = func(cwd string) error { gotCwd = cwd; return nil }
+
+	result := openGhostty(d, "", "/Users/x/worktrees/hellofresh/review-zau/global-ops")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if raised {
+		t.Fatal("focused a window on a too-weak tail")
+	}
+	if gotCwd == "" {
+		t.Fatal("want a new window opened instead")
+	}
+}
+
+func TestOpenGhosttyFullPathWindowWinsOverTruncatedTail(t *testing.T) {
+	// When a full-path window and a truncated window could both match,
+	// the full-path window is raised: the tail stage stays the lowest
+	// priority, so a truncated match can never displace a solid one.
+	d := fakeDeps()
+	d.ghosttyWindows = func() ([]string, bool, error) {
+		return []string{
+			"…/hellofresh/review-zau/global-ops",
+			"~/worktrees/hellofresh/review-zau/global-ops • review-zau/global-ops",
+		}, true, nil
+	}
+	var gotTitle string
+	d.raiseGhosttyWindow = func(title string) (bool, error) { gotTitle = title; return true, nil }
+
+	result := openGhostty(d, "", "/Users/x/worktrees/hellofresh/review-zau/global-ops")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	want := "~/worktrees/hellofresh/review-zau/global-ops • review-zau/global-ops"
+	if gotTitle != want {
+		t.Fatalf("raised %q, want the full-path window %q", gotTitle, want)
+	}
+}
+
 func TestOpenGhosttyMatchlessListingActivatesAndRelistsOnce(t *testing.T) {
 	// Same AX-cull self-heal as the VS Code path (luiul/dashkit#9): a
 	// matchless listing while Ghostty runs gets one activate-and-relist

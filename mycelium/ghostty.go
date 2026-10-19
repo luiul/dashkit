@@ -29,6 +29,16 @@ package mycelium
 // (its focused surface), so a surface running in a background tab of
 // another window isn't listed by its own title. A miss opens a new
 // window, never a hijack.
+//
+// Another gap, handled: a title too long for its window is
+// head-truncated by the titlebar with a leading …
+// ("…/hellofresh/review-zau/global-ops" for a window on
+// ~/worktrees/hellofresh/review-zau/global-ops), and both System
+// Events and Ghostty's own AppleScript report only the truncated
+// label. The full path is unrecoverable, so parseGhosttyWindows keeps
+// such windows and the matcher's tail stage (see matchVSCodeWindow)
+// identifies them against the caller's known path by their visible
+// tail.
 
 import (
 	"path/filepath"
@@ -78,8 +88,9 @@ end if
 // outside a repo. The session-title pi extension may append the
 // surface's tty after the branch ("π • root • branch • ttys034") —
 // not a path segment, so the scan skips past it. Returns "" when no
-// segment parses (pi's own "π - basename" title, a foreign format):
-// such titles never match.
+// segment parses: a foreign format (pi's own "π - basename" title)
+// never matches, and a head-truncated title (leading …) matches only
+// through the tail stage instead (see ghosttyTruncatedTail).
 func ghosttyTitlePath(title, home string) string {
 	segments := strings.Split(title, ghosttyTitleSeparator)
 	for i := len(segments) - 1; i >= 0; i-- {
@@ -97,15 +108,47 @@ func ghosttyTitlePath(title, home string) string {
 	return ""
 }
 
-// parseGhosttyWindows turns raw Ghostty window titles into windows,
-// dropping every title with no parseable root (see ghosttyTitlePath).
-// The element type is vscodeWindow, the shared match machinery's, with
-// the same Title/Path meaning.
+// ghosttyTruncatedTail returns the visible path tail of a
+// head-truncated Ghostty window title, "" when the title isn't
+// truncated or the tail is too weak to match on. A title longer than
+// its window is truncated from the left with a leading … (U+2026)
+// by the titlebar, and both System Events and Ghostty's own
+// AppleScript report the truncated label, so the full title is
+// unrecoverable: the visible tail is the only identity left. The tail
+// is the text after the … up to the first title separator — the
+// surviving right segments are branch and tty, not path — and it
+// must carry a separator of its own: a fragment with no element
+// boundary left ("…global-ops", or a cut that consumed the whole
+// path segment) never matches, erring toward opening a new window
+// over focusing a guess.
+func ghosttyTruncatedTail(title string) string {
+	rest, ok := strings.CutPrefix(title, "…")
+	if !ok {
+		return ""
+	}
+	seg, _, _ := strings.Cut(rest, ghosttyTitleSeparator)
+	if !strings.Contains(seg, "/") {
+		return ""
+	}
+	return seg
+}
+
+// parseGhosttyWindows turns raw Ghostty window titles into windows.
+// A title with a parseable root keeps that root as Path. A title
+// head-truncated by the titlebar (leading …, see
+// ghosttyTruncatedTail) has no parseable root but is kept anyway,
+// with Path empty and the visible tail in Title: the matcher's tail
+// stage can still identify it against a known path. Every other
+// unparseable title (pi's own "π - basename", a foreign format) is
+// dropped as before. The element type is vscodeWindow, the shared
+// match machinery's, with the same Title/Path meaning.
 func parseGhosttyWindows(titles []string, home string) []vscodeWindow {
 	var windows []vscodeWindow
 	for _, title := range titles {
 		if path := ghosttyTitlePath(title, home); path != "" {
 			windows = append(windows, vscodeWindow{Title: title, Path: path})
+		} else if ghosttyTruncatedTail(title) != "" {
+			windows = append(windows, vscodeWindow{Title: title})
 		}
 	}
 	return windows
@@ -118,8 +161,10 @@ func parseGhosttyWindows(titles []string, home string) []vscodeWindow {
 // repo on the same branch have identical path components and are
 // distinguishable only by tty — but its parsed path must still match
 // path under the normal stages, so a recycled tty name can't focus an
-// unrelated window. Without a tty, or when no tty-bearing window
-// matches (an old-format title, an agent started before the
+// unrelated window. A head-truncated window has no parseable path,
+// so it can never win the tty stage; it matches only through
+// matchVSCodeWindow's tail stage. Without a tty, or when no tty-bearing
+// window matches (an old-format title, an agent started before the
 // extension), it falls back to the plain path match
 // (matchVSCodeWindow): understory rows have no tty, and a same-path
 // window is better than a new duplicate.

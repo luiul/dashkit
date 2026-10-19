@@ -144,6 +144,14 @@ func parseVSCodeWindows(titles []string, home string) []vscodeWindow {
 //  3. nested: the window's title path sits inside path, on a path
 //     element boundary ("/wt-a" must not match "/wt-a-b"). This is the
 //     "window open on a subpackage of the worktree" case.
+//  4. truncated tail: the window's title was head-truncated by the
+//     titlebar because it didn't fit (narrow window, long worktree
+//     path), so no full path parsed out of it. Only Ghostty titles
+//     admit such windows (see ghosttyTruncatedTail); the visible
+//     tail matches when path ends with it. Lowest priority on
+//     purpose: it is the only stage that guesses, and a wrong match
+//     is at most a focus on a sibling window whose path shares the
+//     visible tail — versus the guaranteed duplicate a miss opens.
 //
 // Returns the exact title, the handle vscodeRaiseWindow focuses by. The
 // same folder open in two windows matches the first one listed; either
@@ -167,7 +175,33 @@ func matchVSCodeWindow(windows []vscodeWindow, path string, toplevel func(string
 			return w.Title, true
 		}
 	}
+	for _, w := range windows {
+		if w.Path != "" {
+			continue
+		}
+		if tail := ghosttyTruncatedTail(w.Title); tail != "" && pathEndsWithTail(path, tail) {
+			return w.Title, true
+		}
+	}
 	return "", false
+}
+
+// pathEndsWithTail reports whether path ends with tail, the visible
+// tail of a head-truncated title path. The truncation cut can land
+// mid-component ("…fresh/review-zau/global-ops" for a window on
+// "…/hellofresh/review-zau/global-ops"), so a failed direct match
+// retries once from the tail's first separator, which restores the
+// element boundary. Tails cut at a boundary start with the separator
+// and match directly; the retry is what keeps a mid-component cut
+// from producing a stray false negative.
+func pathEndsWithTail(path, tail string) bool {
+	if strings.HasSuffix(path, tail) {
+		return true
+	}
+	if i := strings.Index(tail, string(filepath.Separator)); i > 0 {
+		return strings.HasSuffix(path, tail[i:])
+	}
+	return false
 }
 
 // matchVSCodeWindowOnWorktree is the strict match for destructive-action
