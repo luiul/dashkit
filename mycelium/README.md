@@ -15,9 +15,7 @@ being duplicated in both trees.
 
 ## The open-or-focus flow at a glance
 
-![Flowchart of mycelium.OpenVSCode: canopy and understory hand over a path; the library lists VS Code window titles via System Events, parses folder paths out of them, matches exact then work-tree root then nested, focuses a match with AXRaise, retries the listing once against macOS accessibility culling, and otherwise opens a genuinely new window with code -n](diagrams/open-or-focus-vscode.drawio.svg)
-
-*Drawn at v0.12. Since v0.15, understory's Enter goes through the Ghostty path instead, which mirrors this exact flow with title-based window identity (see ghostty.go); OpenVSCode's remaining consumer is canopy's VS Code-surfaced rows.*
+![Flowchart of mycelium's title-based open-or-focus, shared by VS Code and Ghostty: canopy and understory hand over a path (and a tty for Ghostty-surfaced agents); the library lists window titles per app via System Events, parses the work-tree root out of each title, prefers a tty-bearing window when the caller knows one and then matches exact, work-tree root, and nested; focuses a match with AXRaise, retries the listing once against macOS accessibility culling, and otherwise opens a genuinely new window](diagrams/open-or-focus.drawio.svg)
 
 ## Why this needs to exist at all
 
