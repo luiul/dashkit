@@ -22,8 +22,8 @@ func fakeDeps() deps {
 		home:                 func() string { return "/Users/x" },
 		toplevel:             func(dir string) string { return "" },
 		ghosttyWindows:       func() ([]string, bool, error) { return nil, false, nil },
+		ghosttyWindowsDeep:   func() ([]string, bool, error) { return nil, false, nil },
 		raiseGhosttyWindow:   func(title string) (bool, error) { return true, nil },
-		activateGhostty:      func() error { return nil },
 		ghosttyOpenNewWindow: func(cwd string) error { return nil },
 	}
 }
@@ -533,21 +533,23 @@ func TestOpenGhosttyFullPathWindowWinsOverTruncatedTail(t *testing.T) {
 	}
 }
 
-func TestOpenGhosttyMatchlessListingActivatesAndRelistsOnce(t *testing.T) {
-	// Same AX-cull self-heal as the VS Code path (luiul/dashkit#9): a
-	// matchless listing while Ghostty runs gets one activate-and-relist
-	// before a new window is allowed.
+func TestOpenGhosttyMatchlessListingDeepRelistsOnce(t *testing.T) {
+	// Same AX-cull self-heal as the VS Code path (luiul/dashkit#9), in
+	// the multi-instance shape: a matchless plain listing while Ghostty
+	// runs gets one deep listing — every instance frontmost in turn,
+	// its titles collected while it is frontmost — before a new window
+	// is allowed. Here the deep listing sees the window and focuses it.
 	d := fakeDeps()
 	listCalls := 0
 	d.ghosttyWindows = func() ([]string, bool, error) {
 		listCalls++
-		if listCalls == 1 {
-			return []string{"~/canopy • main"}, true, nil
-		}
+		return []string{"~/canopy • main"}, true, nil
+	}
+	deepCalls := 0
+	d.ghosttyWindowsDeep = func() ([]string, bool, error) {
+		deepCalls++
 		return []string{"~/canopy • main", "~/dotfiles • main"}, true, nil
 	}
-	activations := 0
-	d.activateGhostty = func() error { activations++; return nil }
 	var gotTitle string
 	d.raiseGhosttyWindow = func(title string) (bool, error) { gotTitle = title; return true, nil }
 
@@ -556,25 +558,54 @@ func TestOpenGhosttyMatchlessListingActivatesAndRelistsOnce(t *testing.T) {
 	if !result.OK {
 		t.Fatalf("want ok, got %+v", result)
 	}
-	if listCalls != 2 {
-		t.Fatalf("listed %d times, want exactly 2 (one re-list)", listCalls)
+	if listCalls != 1 {
+		t.Fatalf("plain listing ran %d times, want 1", listCalls)
 	}
-	if activations != 1 {
-		t.Fatalf("activated %d times, want 1", activations)
+	if deepCalls != 1 {
+		t.Fatalf("deep listing ran %d times, want 1", deepCalls)
 	}
 	if gotTitle != "~/dotfiles • main" {
-		t.Fatalf("raised %q, want the re-listed window's title", gotTitle)
+		t.Fatalf("raised %q, want the deep-listed window's title", gotTitle)
+	}
+}
+
+func TestOpenGhosttyStillMatchlessAfterDeepListingOpensANewWindow(t *testing.T) {
+	// Both listings agree nothing is open on path: opening a new
+	// window is proven safe. Mirrors the VS Code path's
+	// StillMatchlessAfterRelist test.
+	d := fakeDeps()
+	d.ghosttyWindows = func() ([]string, bool, error) {
+		return []string{"~/canopy • main"}, true, nil
+	}
+	deepCalls := 0
+	d.ghosttyWindowsDeep = func() ([]string, bool, error) {
+		deepCalls++
+		return []string{"~/canopy • main"}, true, nil
+	}
+	var gotCwd string
+	d.ghosttyOpenNewWindow = func(cwd string) error { gotCwd = cwd; return nil }
+
+	result := openGhostty(d, "", "/Users/x/dotfiles")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if deepCalls != 1 {
+		t.Fatalf("deep listing ran %d times, want 1", deepCalls)
+	}
+	if gotCwd != "/Users/x/dotfiles" {
+		t.Fatalf("opened new window at %q", gotCwd)
 	}
 }
 
 func TestOpenGhosttyNotRunningOpensNewWindowWithoutRelisting(t *testing.T) {
-	// Ghostty closed is a definitive nothing-open: no activate, no
-	// re-list, straight to a new window.
+	// Ghostty closed is a definitive nothing-open: no deep listing,
+	// straight to a new window.
 	d := fakeDeps()
 	listCalls := 0
 	d.ghosttyWindows = func() ([]string, bool, error) { listCalls++; return nil, false, nil }
-	activated := false
-	d.activateGhostty = func() error { activated = true; return nil }
+	deepCalls := 0
+	d.ghosttyWindowsDeep = func() ([]string, bool, error) { deepCalls++; return nil, false, nil }
 	var gotCwd string
 	d.ghosttyOpenNewWindow = func(cwd string) error { gotCwd = cwd; return nil }
 
@@ -586,8 +617,8 @@ func TestOpenGhosttyNotRunningOpensNewWindowWithoutRelisting(t *testing.T) {
 	if listCalls != 1 {
 		t.Fatalf("listed %d times, want 1", listCalls)
 	}
-	if activated {
-		t.Fatal("activated Ghostty even though it isn't running")
+	if deepCalls != 0 {
+		t.Fatal("deep listed even though Ghostty isn't running")
 	}
 	if gotCwd != "/Users/x/dotfiles" {
 		t.Fatalf("opened new window at %q", gotCwd)

@@ -50,28 +50,84 @@ import (
 const ghosttyTitleSeparator = " • "
 
 // ghosttyWindows lists the title of every window System Events can see
-// in the ghostty process, plus whether Ghostty is running at all — the
-// same shape, record encoding, and AX-culling caveat as vscodeWindows
-// (see that function; the running flag exists so callers can tell
-// "Ghostty closed" from "running but the listing came back empty",
-// which can be macOS culling the AX tree of a backgrounded app,
+// across every running Ghostty process, plus whether Ghostty is running
+// at all — the same record encoding and AX-culling caveat as
+// vscodeWindows (see that function; the running flag exists so callers
+// can tell "Ghostty closed" from "running but the listing came back
+// empty", which can be macOS culling the AX tree of a backgrounded app,
 // luiul/dashkit#9).
+//
+// Every process, not `tell process "ghostty"`: System Events resolves
+// that form to ONE process, and macOS runs several Ghostty instances of
+// the same bundle just fine (the dotfiles piw used to spawn one per
+// call via `open -na`). A tell-process listing reports only one
+// instance's windows, so a jump for a window living in another instance
+// looks like a miss and opens a duplicate. Enumerating every process
+// named "ghostty" and merging their windows keeps this listing, and
+// with it the jump and the "Ghostty open?" snapshot column, correct
+// under duplicates. A culled backgrounded instance still contributes
+// no windows here — the deep frontmost-then-collect pass in
+// findGhosttyWindow and the frontmost-then-search pass in
+// ghosttyRaiseWindow handle that.
+//
+// The whose-filtered process list is enumerated inline in the repeat
+// header, never stored in a variable first: a stored whose-filter
+// dereferences every one of its items back to the first matching
+// process, so the loop would list the first instance's windows once per
+// instance and the others' never — the exact bug this exists to fix.
 func ghosttyWindows() (titles []string, running bool, err error) {
 	out, err := runOsascript(`
-if application "Ghostty" is running then
-	tell application "System Events"
-		tell process "ghostty"
-			set out to ""
-			set RS to (ASCII character 30)
-			repeat with w in windows
-				set out to out & (name of w) & RS
-			end repeat
-			return "1" & (ASCII character 31) & out
-		end tell
-	end tell
-else
-	return "0" & (ASCII character 31) & ""
-end if
+tell application "System Events"
+	if (count of (every process whose name is "ghostty")) is 0 then
+		return "0" & (ASCII character 31) & ""
+	end if
+	set out to ""
+	set RS to (ASCII character 30)
+	repeat with p in (every process whose name is "ghostty")
+		repeat with w in (every window of p)
+			set out to out & (name of w) & RS
+		end repeat
+	end repeat
+	return "1" & (ASCII character 31) & out
+end tell
+`)
+	if err != nil {
+		return nil, false, err
+	}
+	titles, running = parseVSCodeWindowList(out)
+	return titles, running, nil
+}
+
+// ghosttyWindowsDeep is ghosttyWindows' frontmost-then-collect
+// variant, for callers that are about to move focus anyway (the jump
+// path): it sets each Ghostty process frontmost in turn — which
+// materializes that process's AX tree, the same re-materialization an
+// activate provides (luiul/dashkit#9) — and collects its window titles
+// as plain strings while it is frontmost. Strings don't decay: once
+// collected, later culling of the now-backgrounded process can't
+// retract them, unlike an activate-then-relist, which asks for all
+// windows at once and gets only whichever single instance is still
+// materialized. That makes it the only way to see every window across
+// several Ghostty instances. It moves focus, so the SnapshotGhostty
+// poll keeps using the plain ghosttyWindows. Same inline-enumeration
+// rules as ghosttyWindows: no stored whose-filters, and no windows
+// kept as references across iterations.
+func ghosttyWindowsDeep() (titles []string, running bool, err error) {
+	out, err := runOsascript(`
+tell application "System Events"
+	if (count of (every process whose name is "ghostty")) is 0 then
+		return "0" & (ASCII character 31) & ""
+	end if
+	set out to ""
+	set RS to (ASCII character 30)
+	repeat with p in (every process whose name is "ghostty")
+		set frontmost of p to true
+		repeat with w in (every window of p)
+			set out to out & (name of w) & RS
+		end repeat
+	end repeat
+	return "1" & (ASCII character 31) & out
+end tell
 `)
 	if err != nil {
 		return nil, false, err
@@ -230,18 +286,41 @@ func windowPathMatches(windowPath, path string, toplevel func(string) string) bo
 // above other apps' windows until its own app is). Returns false, no
 // error, if no window with that title exists anymore (e.g. it was
 // closed between ghosttyWindows finding it and this call).
+//
+// Frontmost-then-search per process: with several Ghostty instances
+// running, `tell process "ghostty"` sees only one of them, and a
+// backgrounded instance's AX tree is culled entirely (luiul/dashkit#9),
+// so the target window can be invisible exactly where it lives. Making
+// each process frontmost right before searching it re-materializes that
+// process's tree; the loop exits with the holding instance frontmost
+// and its window raised, whichever instance that is. With one instance
+// this is the old activate-and-raise plus one redundant frontmost.
+//
+// The window search deliberately avoids `every window of p whose name
+// is X`: that whose-filter mints window references against the by-NAME
+// `application process "ghostty"`, which System Events resolves to
+// the FIRST instance — so with duplicates the AXRaise would target a
+// window of the wrong instance (or error out on one that lives in the
+// other). Iterating `every window of p` plainly and comparing names in
+// AppleScript keeps the per-process reference context, the same inline
+// form ghosttyWindows' enumeration proves correct. Nothing is stored
+// across iterations: stored whose-filter items dereference back to the
+// first match.
 func ghosttyRaiseWindow(title string) (bool, error) {
 	script := `
 tell application "Ghostty" to activate
 tell application "System Events"
-	tell process "ghostty"
-		set matches to (every window whose name is "` + escapeForAppleScript(title) + `")
-		if (count of matches) is 0 then
-			return "false"
-		end if
-		perform action "AXRaise" of (item 1 of matches)
-		return "true"
-	end tell
+	repeat with p in (every process whose name is "ghostty")
+		set frontmost of p to true
+		repeat with w in (every window of p)
+			if (name of w) is "` + escapeForAppleScript(title) + `" then
+				perform action "AXRaise" of w
+				set frontmost of p to true
+				return "true"
+			end if
+		end repeat
+	end repeat
+	return "false"
 end tell
 `
 	out, err := runOsascript(script)
@@ -249,16 +328,6 @@ end tell
 		return false, err
 	}
 	return out == "true", nil
-}
-
-// ghosttyActivate brings Ghostty itself to the front. Besides moving
-// focus, this re-materializes the process's AX tree the same way
-// vscodeActivateCode does: macOS culls windows from System Events' view
-// of a backgrounded app, and an activate makes them enumerable again
-// (luiul/dashkit#9).
-func ghosttyActivate() error {
-	_, err := runOsascript(`tell application "Ghostty" to activate`)
-	return err
 }
 
 // ghosttyOpenNewWindow opens a brand-new Ghostty window with its

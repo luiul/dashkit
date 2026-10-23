@@ -109,7 +109,17 @@ repo on the same branch have identical path components, and
 `OpenGhostty(tty, path)` raises the window whose title carries the
 caller's tty (canopy knows each agent's tty from ps). Without a tty,
 or when no tty-bearing window matches, matching falls back to the path
-alone. Accepted gap: System Events reports one title per window (its
+alone. A matchless first listing while Ghostty runs gets one deep retry,
+which matters under culling and duplicates: macOS culls the AX tree of
+a backgrounded app ([luiul/dashkit#9](https://github.com/luiul/dashkit/issues/9)),
+and several Ghostty instances of the same bundle can run at once, so a
+plain listing reliably sees only the frontmost instance's windows. The
+deep retry makes each instance frontmost in turn and collects its
+titles as strings while it is frontmost, so neither culling nor a
+second instance can hide a window from the jump; focus moves during the
+deep retry, but a jump is moving focus anyway. The `SnapshotGhostty`
+poll keeps the plain listing, since a poll must not steal focus.
+Accepted gap: System Events reports one title per window (its
 focused surface), so a surface in a background tab of another window
 isn't listed by its own title; a miss opens a new window, never a
 hijack. A title too long for its window is head-truncated by the

@@ -65,8 +65,8 @@ type deps struct {
 	raiseWindow          func(title string) (bool, error)
 	activateCode         func() error
 	ghosttyWindows       func() (titles []string, running bool, err error)
+	ghosttyWindowsDeep   func() (titles []string, running bool, err error)
 	raiseGhosttyWindow   func(title string) (bool, error)
-	activateGhostty      func() error
 	home                 func() string
 	toplevel             func(dir string) string
 	ghosttyOpenNewWindow func(cwd string) error
@@ -94,8 +94,8 @@ func defaultDeps() deps {
 		},
 		toplevel:             gitToplevel,
 		ghosttyWindows:       ghosttyWindows,
+		ghosttyWindowsDeep:   ghosttyWindowsDeep,
 		raiseGhosttyWindow:   ghosttyRaiseWindow,
-		activateGhostty:      ghosttyActivate,
 		ghosttyOpenNewWindow: ghosttyOpenNewWindow,
 	}
 }
@@ -276,9 +276,15 @@ func openGhostty(d deps, tty, path string) Result {
 }
 
 // findGhosttyWindow is Ghostty's findVSCodeWindow: the exact title of
-// an open Ghostty window matched on path, with the same
-// activate-and-relist once against an AX-culled matchless listing
-// while Ghostty runs (luiul/dashkit#9).
+// an open Ghostty window matched on path. A matchless listing while
+// Ghostty runs is not believed: macOS culls the AX tree of a
+// backgrounded app (luiul/dashkit#9), and with several Ghostty
+// instances a plain listing reliably sees only the frontmost one's
+// windows. The retry is the deep listing (ghosttyWindowsDeep): every
+// instance is made frontmost in turn and its titles collected while it
+// is frontmost, so culling cannot hide a window from the jump. Focus
+// moves during the deep listing, but a jump is moving focus anyway,
+// and the follow-up raise or new window lands it where it belongs.
 func findGhosttyWindow(d deps, tty, path string) (string, bool, error) {
 	match := func(titles []string) (string, bool) {
 		return matchGhosttyWindow(parseGhosttyWindows(titles, d.home()), path, d.toplevel, tty)
@@ -293,8 +299,7 @@ func findGhosttyWindow(d deps, tty, path string) (string, bool, error) {
 	}
 
 	if running {
-		_ = d.activateGhostty()
-		titles, _, err = d.ghosttyWindows()
+		titles, _, err = d.ghosttyWindowsDeep()
 		if err != nil {
 			return "", false, err
 		}
