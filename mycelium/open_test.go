@@ -14,13 +14,19 @@ import (
 // `code` CLI.
 func fakeDeps() deps {
 	return deps{
-		lookPathCode:         func() (string, bool) { return "/usr/local/bin/code", true },
-		runCommand:           func(args []string) (bool, string) { return true, "" },
-		vscodeWindows:        func() ([]string, bool, error) { return nil, false, nil },
-		raiseWindow:          func(title string) (bool, error) { return true, nil },
-		activateCode:         func() error { return nil },
-		home:                 func() string { return "/Users/x" },
-		toplevel:             func(dir string) string { return "" },
+		lookPathCode:  func() (string, bool) { return "/usr/local/bin/code", true },
+		runCommand:    func(args []string) (bool, string) { return true, "" },
+		vscodeWindows: func() ([]string, bool, error) { return nil, false, nil },
+		raiseWindow:   func(title string) (bool, error) { return true, nil },
+		activateCode:  func() error { return nil },
+		home:          func() string { return "/Users/x" },
+		toplevel:      func(dir string) string { return "" },
+		// The surface stage defaults to unavailable, so tests that fake
+		// the title layer (ghosttyWindows and friends) keep exercising
+		// it as the fallback, exactly the flow a real run takes when
+		// the bridge or its permission is missing.
+		ghosttySurfaces:      func() ([]ghosttySurface, int, error) { return nil, 0, errors.New("ghosttySurfaces: not faked") },
+		focusGhosttySurface:  func(ghosttySurface) (bool, error) { return false, nil },
 		ghosttyWindows:       func() ([]string, bool, error) { return nil, false, nil },
 		ghosttyWindowsDeep:   func() ([]string, bool, error) { return nil, false, nil },
 		raiseGhosttyWindow:   func(title string) (bool, error) { return true, nil },
@@ -781,5 +787,310 @@ func TestOpenGhosttyUnknownTtyFallsBackToPathMatch(t *testing.T) {
 	}
 	if gotTitle != "~/dotfiles • main" {
 		t.Fatalf("raised %q, want the path-matched window", gotTitle)
+	}
+}
+
+// TestOpenGhosttySurfaceStageFocusesLockedTitleSplits pins the case
+// that motivated the surface stage: a worktree running in a split
+// whose window title is locked to a label (the dotfiles Karabiner
+// "cc" marking) has a title no matcher can parse, but its tracked
+// working directory still names the worktree. The surface stage
+// focuses it by window id and coordinates; the title layer is never
+// consulted.
+func TestOpenGhosttySurfaceStageFocusesLockedTitleSplits(t *testing.T) {
+	d := fakeDeps()
+	d.ghosttySurfaces = func() ([]ghosttySurface, int, error) {
+		return []ghosttySurface{{windowID: "tab-group-w", tabIdx: 1, termIdx: 1, dir: "/Users/x/worktrees/canopy"}}, 1, nil
+	}
+	var focused ghosttySurface
+	d.focusGhosttySurface = func(s ghosttySurface) (bool, error) { focused = s; return true, nil }
+	titleListed := false
+	d.ghosttyWindows = func() ([]string, bool, error) { titleListed = true; return nil, true, nil }
+	openedNew := false
+	d.ghosttyOpenNewWindow = func(string) error { openedNew = true; return nil }
+
+	result := openGhostty(d, "", "/Users/x/worktrees/canopy")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if focused.windowID != "tab-group-w" || focused.tabIdx != 1 || focused.termIdx != 1 {
+		t.Fatalf("focused %+v, want the matched surface's coordinates", focused)
+	}
+	if titleListed {
+		t.Fatal("the title layer ran although the surface stage matched")
+	}
+	if openedNew {
+		t.Fatal("opened a new window on a focus path")
+	}
+}
+
+// TestOpenGhosttySurfaceStageRunsTheSharedMatchStages pins the stage
+// order over surface directories: a path inside a checkout reuses the
+// window open on the work-tree root, and a path with nothing open on
+// it or its root reuses a window open on a subpackage inside it. The
+// stages are matchVSCodeWindow's, unchanged.
+func TestOpenGhosttySurfaceStageRunsTheSharedMatchStages(t *testing.T) {
+	d := fakeDeps()
+	d.ghosttySurfaces = func() ([]ghosttySurface, int, error) {
+		return []ghosttySurface{
+			{windowID: "w-nested", tabIdx: 1, termIdx: 1, dir: "/Users/x/monorepo/pkg-a"},
+			{windowID: "w-root", tabIdx: 1, termIdx: 1, dir: "/Users/x/monorepo"},
+		}, 1, nil
+	}
+	d.toplevel = fakeToplevel("/Users/x/monorepo")
+	var focused ghosttySurface
+	d.focusGhosttySurface = func(s ghosttySurface) (bool, error) { focused = s; return true, nil }
+
+	if result := openGhostty(d, "", "/Users/x/monorepo/pkg-a/sub"); !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if focused.windowID != "w-root" {
+		t.Fatalf("focused %q, want the work-tree root stage winner", focused.windowID)
+	}
+
+	if result := openGhostty(d, "", "/Users/x/monorepo/pkg-b"); !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if focused.windowID != "w-root" {
+		t.Fatalf("focused %q, want the work-tree root stage winner again", focused.windowID)
+	}
+}
+
+// TestOpenGhosttySurfaceTtyStageWinsWhenTheBuildExposesTty pins the
+// disambiguation for Ghostty builds with the tty property (upstream
+// ghostty#11922, merged after 1.3.1): two agents side by side in the
+// same repo differ only by surface tty, and the tty names the exact
+// one to focus.
+func TestOpenGhosttySurfaceTtyStageWinsWhenTheBuildExposesTty(t *testing.T) {
+	d := fakeDeps()
+	d.ghosttySurfaces = func() ([]ghosttySurface, int, error) {
+		return []ghosttySurface{
+			{windowID: "w1", tabIdx: 1, termIdx: 1, dir: "/Users/x/dotfiles", tty: "ttys001"},
+			{windowID: "w2", tabIdx: 1, termIdx: 1, dir: "/Users/x/dotfiles", tty: "ttys002"},
+		}, 1, nil
+	}
+	var focused ghosttySurface
+	d.focusGhosttySurface = func(s ghosttySurface) (bool, error) { focused = s; return true, nil }
+
+	result := openGhostty(d, "ttys002", "/Users/x/dotfiles")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if focused.windowID != "w2" {
+		t.Fatalf("focused %q, want the tty-matched surface", focused.windowID)
+	}
+}
+
+// TestOpenGhosttySurfaceTtyMatchStillRequiresThePath keeps the title
+// stage's recycled-tty guard on the surface stage: a tty match whose
+// directory doesn't match is ignored, and the path stages pick the
+// right surface instead.
+func TestOpenGhosttySurfaceTtyMatchStillRequiresThePath(t *testing.T) {
+	d := fakeDeps()
+	d.ghosttySurfaces = func() ([]ghosttySurface, int, error) {
+		return []ghosttySurface{
+			{windowID: "w1", tabIdx: 1, termIdx: 1, dir: "/Users/x/canopy", tty: "ttys002"},
+			{windowID: "w2", tabIdx: 1, termIdx: 1, dir: "/Users/x/dotfiles"},
+		}, 1, nil
+	}
+	var focused ghosttySurface
+	d.focusGhosttySurface = func(s ghosttySurface) (bool, error) { focused = s; return true, nil }
+
+	result := openGhostty(d, "ttys002", "/Users/x/dotfiles")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if focused.windowID != "w2" {
+		t.Fatalf("focused %q, want the path-matched surface", focused.windowID)
+	}
+}
+
+// TestOpenGhosttySingleInstanceMissSkipsTheTitleStage pins the miss
+// shortcut: with one running instance, the surface listing saw every
+// window, tab, and split through the app's own state (no AX culling),
+// so the title layer — one lossy name per window — cannot know more,
+// and its deep relisting with its focus churn must not run. Miss means
+// miss: a genuinely new window opens.
+func TestOpenGhosttySingleInstanceMissSkipsTheTitleStage(t *testing.T) {
+	d := fakeDeps()
+	d.ghosttySurfaces = func() ([]ghosttySurface, int, error) {
+		return []ghosttySurface{{windowID: "w1", tabIdx: 1, termIdx: 1, dir: "/Users/x/dotfiles"}}, 1, nil
+	}
+	titleListed, deepListed := false, false
+	d.ghosttyWindows = func() ([]string, bool, error) { titleListed = true; return nil, true, nil }
+	d.ghosttyWindowsDeep = func() ([]string, bool, error) { deepListed = true; return nil, true, nil }
+	openedNew := false
+	d.ghosttyOpenNewWindow = func(string) error { openedNew = true; return nil }
+
+	result := openGhostty(d, "", "/Users/x/nowhere")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if !openedNew {
+		t.Fatal("a surface miss must open a new window")
+	}
+	if titleListed || deepListed {
+		t.Fatal("the title layer ran although one surface listing already saw everything")
+	}
+}
+
+// TestOpenGhosttyNotRunningShortCircuitsToNewWindow pins the cheap
+// not-running path: the process count already proved no window exists
+// anywhere, so no title listing runs and a genuinely new window opens.
+func TestOpenGhosttyNotRunningShortCircuitsToNewWindow(t *testing.T) {
+	d := fakeDeps()
+	d.ghosttySurfaces = func() ([]ghosttySurface, int, error) { return nil, 0, nil }
+	titleListed := false
+	d.ghosttyWindows = func() ([]string, bool, error) { titleListed = true; return nil, false, nil }
+	openedNew := false
+	d.ghosttyOpenNewWindow = func(string) error { openedNew = true; return nil }
+
+	result := openGhostty(d, "", "/Users/x/dotfiles")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if !openedNew {
+		t.Fatal("must open a new window when Ghostty isn't running")
+	}
+	if titleListed {
+		t.Fatal("the title layer ran although the process count settled it")
+	}
+}
+
+// TestOpenGhosttyMultiInstanceSurfaceMissFallsBackToTitles pins the
+// one case where a surface miss must still run the title stage: several
+// Ghostty instances, with the target window living in an instance the
+// bridge can't address.
+func TestOpenGhosttyMultiInstanceSurfaceMissFallsBackToTitles(t *testing.T) {
+	d := fakeDeps()
+	d.ghosttySurfaces = func() ([]ghosttySurface, int, error) {
+		return []ghosttySurface{{windowID: "w1", tabIdx: 1, termIdx: 1, dir: "/Users/x/dotfiles"}}, 2, nil
+	}
+	d.ghosttyWindows = func() ([]string, bool, error) {
+		return []string{"~/worktrees/canopy • feat/y"}, true, nil
+	}
+	d.ghosttyWindowsDeep = func() ([]string, bool, error) {
+		return []string{"~/worktrees/canopy • feat/y"}, true, nil
+	}
+	var raised string
+	d.raiseGhosttyWindow = func(title string) (bool, error) { raised = title; return true, nil }
+
+	result := openGhostty(d, "", "/Users/x/worktrees/canopy")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if raised != "~/worktrees/canopy • feat/y" {
+		t.Fatalf("raised %q, want the title-matched window of the other instance", raised)
+	}
+}
+
+// TestOpenGhosttyVanishedSurfaceOpensNewWindow keeps the title stage's
+// race semantics on the surface stage: a surface that vanished between
+// the listing and the focus (its window closed mid-jump) counts as a
+// miss, and a fresh window opens rather than failing the jump.
+func TestOpenGhosttyVanishedSurfaceOpensNewWindow(t *testing.T) {
+	d := fakeDeps()
+	d.ghosttySurfaces = func() ([]ghosttySurface, int, error) {
+		return []ghosttySurface{{windowID: "w1", tabIdx: 1, termIdx: 1, dir: "/Users/x/dotfiles"}}, 1, nil
+	}
+	d.focusGhosttySurface = func(ghosttySurface) (bool, error) { return false, nil }
+	openedNew := false
+	d.ghosttyOpenNewWindow = func(string) error { openedNew = true; return nil }
+
+	result := openGhostty(d, "", "/Users/x/dotfiles")
+
+	if !result.OK {
+		t.Fatalf("want ok, got %+v", result)
+	}
+	if !openedNew {
+		t.Fatal("a vanished surface must open a new window")
+	}
+}
+
+// TestOpenGhosttySurfaceFocusErrorSurfacesAndOpensNothing keeps the
+// raise-error semantics of the title stage: a focus error on a surface
+// that was just listed is surfaced, not retried with a new window —
+// the window is known open, and a second one would stack the duplicate
+// this library exists to prevent.
+func TestOpenGhosttySurfaceFocusErrorSurfacesAndOpensNothing(t *testing.T) {
+	d := fakeDeps()
+	d.ghosttySurfaces = func() ([]ghosttySurface, int, error) {
+		return []ghosttySurface{{windowID: "w1", tabIdx: 1, termIdx: 1, dir: "/Users/x/dotfiles"}}, 1, nil
+	}
+	d.focusGhosttySurface = func(ghosttySurface) (bool, error) { return false, errors.New("bridge broke") }
+	openedNew := false
+	d.ghosttyOpenNewWindow = func(string) error { openedNew = true; return nil }
+
+	result := openGhostty(d, "", "/Users/x/dotfiles")
+
+	if result.OK {
+		t.Fatalf("want the focus error surfaced, got %+v", result)
+	}
+	if openedNew {
+		t.Fatal("opened a new window on a known-open path")
+	}
+}
+
+// TestParseGhosttySurfacesDecodesTheListingRecord pins the wire format
+// against script drift: RS-separated records, US-separated fields
+// (window id, tab index, terminal index, directory, short tty), an
+// empty directory kept as an unmatchable surface, and malformed
+// records skipped rather than fatal.
+func TestParseGhosttySurfacesDecodesTheListingRecord(t *testing.T) {
+	raw := "w1\x1f1\x1f2\x1f/Users/x/dotfiles\x1fttys004\x1e" +
+		"w2\x1f1\x1f1\x1f/Users/x/never-reported\x1f\x1e" +
+		"\x1e" +
+		"junk\x1e" +
+		"w3\x1fnot-a-number\x1f1\x1f/Users/x/bad\x1f\x1e"
+	want := []ghosttySurface{
+		{windowID: "w1", tabIdx: 1, termIdx: 2, dir: "/Users/x/dotfiles", tty: "ttys004"},
+		{windowID: "w2", tabIdx: 1, termIdx: 1, dir: "/Users/x/never-reported", tty: ""},
+	}
+	got := parseGhosttySurfaces(raw)
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+// TestGhosttySurfaceKeyRoundTripsFocusCoordinates pins the encoding the
+// focus step decodes: the key is the ONLY handle crossing the match
+// machinery, so a key that doesn't survive the round trip loses the
+// focus binding between identification and raise.
+func TestGhosttySurfaceKeyRoundTripsFocusCoordinates(t *testing.T) {
+	s := ghosttySurface{windowID: "tab-group-w", tabIdx: 3, termIdx: 2}
+	want := ghosttySurface{windowID: "tab-group-w", tabIdx: 3, termIdx: 2}
+	back, ok := parseGhosttySurfaceKey(s.key())
+	if !ok || back != want {
+		t.Fatalf("key %q round-tripped to %+v (ok=%v)", s.key(), back, ok)
+	}
+	if _, ok := parseGhosttySurfaceKey("no separators"); ok {
+		t.Fatal("a key without separators must not parse")
+	}
+	if _, ok := parseGhosttySurfaceKey("w\x1f1\x1fNaN"); ok {
+		t.Fatal("a key with a non-numeric index must not parse")
+	}
+}
+
+// TestIsNoSuchObjectErrorMatchesVanishedSpecifiers pins which errors
+// count as "the window vanished mid-jump" (-1728 and its Can't-get
+// wording, straight and typographic): those open a fresh window, while
+// anything else surfaces.
+func TestIsNoSuchObjectErrorMatchesVanishedSpecifiers(t *testing.T) {
+	for _, msg := range []string{
+		"execution error: Ghostty got an error: Can’t get terminal 1 of tab 1 of window id \"x\". (-1728)",
+		"Can't get window id \"x\"",
+	} {
+		if !isNoSuchObjectError(errors.New(msg)) {
+			t.Fatalf("%q must classify as vanished", msg)
+		}
+	}
+	if isNoSuchObjectError(errors.New("not authorized to send Apple events")) {
+		t.Fatal("a permission error must not classify as vanished")
 	}
 }

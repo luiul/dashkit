@@ -158,10 +158,20 @@ call repeatedly on the same never-before-seen path: the already-open
 check finds the window `OpenVSCode` itself just created on every
 subsequent call, so nothing stacks up duplicate windows.
 
-`mycelium.OpenGhostty` does the equivalent for a bare Ghostty tab,
-matching by working directory (Ghostty's `tty`/`pid` AppleScript
-properties don't reliably work as of Ghostty 1.3.1; working directory
-does).
+`mycelium.OpenGhostty` does the equivalent for Ghostty through two
+layers. Ghostty's own AppleScript bridge comes first: one osascript lists
+every window, tab, and split with its tracked working directory (data, not
+titles — so a worktree running in a background tab, in a split, or under a
+locked window title still counts as open), the shared stages match over
+those directories, and the winner is focused by its window id and
+tab/terminal coordinates. The System Events window-title listing sits behind
+it for what the bridge cannot see: every *other* running Ghostty instance,
+and a missing Ghostty automation permission. Ghostty's `tty` AppleScript
+property, the exact surface key, arrives only in builds after 1.3.1
+(upstream [ghostty#11922](https://github.com/ghostty-org/ghostty/pull/11922));
+on 1.3.1 the tty read silently degrades and matching falls back to the
+path stages, with the title grammar still carrying the tty when the caller
+passes one.
 
 `mycelium.SnapshotVSCode` is the read-only half: one queryable snapshot
 of which VS Code windows are open, for dashboards showing per-row
@@ -174,6 +184,14 @@ backgrounded app) is reported by `Err()` and makes every `IsOpen`
 false, so callers render "can't tell" rather than "definitely not
 open".
 
+`mycelium.SnapshotGhostty` is the read-only half for Ghostty, built
+from the bridge's per-surface directories (the title listing again as
+multi-instance union or fallback), so a poll answers "open" for windows
+title matching could never see, and Enter focuses exactly the surface the
+column saw. On the normal single-instance path the snapshot has no AX
+culling at all: not running, or running with no windows, is a definitive
+closed rather than a "can't tell".
+
 ### Usage
 
 ```go
@@ -182,7 +200,7 @@ import "github.com/luiul/dashkit/mycelium"
 result := mycelium.OpenVSCode("/Users/you/code/some-repo")
 // result.OK, result.Message
 
-result = mycelium.OpenGhostty("/Users/you/code/some-repo")
+result = mycelium.OpenGhostty("", "/Users/you/code/some-repo")
 
 snapshot := mycelium.SnapshotVSCode() // one window listing per poll
 open := snapshot.IsOpen("/Users/you/code/some-repo")

@@ -65,22 +65,87 @@ func SnapshotVSCode() *WindowSnapshot {
 	return newWindowSnapshot(vscodeWindows, parseVSCodeWindows, "vscode", home, gitToplevel)
 }
 
-// SnapshotGhostty captures the currently open Ghostty windows the same
-// way, parsed with the Ghostty title grammar (see ghostty.go). Same
-// error contract as SnapshotVSCode.
+// SnapshotGhostty captures the currently open Ghostty surfaces from
+// one AppleScript round trip through Ghostty's own bridge (see
+// ghosttySurfaces): every window, tab, and split with its tracked
+// working directory, no AX culling and no title parsing. The
+// snapshot's IsOpen answers from those directories, so a window
+// running a worktree in a background tab or split, invisible to any
+// window-title listing, reads "open" — and Enter (openGhostty)
+// focuses the same surface the poll saw, because both run the same
+// stages over the same surface data.
+//
+// The bridge addresses exactly one Ghostty instance, so with several
+// running it also unions the System Events title listing (see
+// ghosttyWindows, parseGhosttyWindows): windows living in the other
+// instances keep their open state through title matching, culling
+// caveats and all. When the bridge itself is unavailable (the Ghostty
+// automation permission, a bridge error), the whole snapshot falls
+// back to that title listing alone — the pre-bridge behavior, with
+// errListingEmpty as its "can't tell" state.
 func SnapshotGhostty() *WindowSnapshot {
 	home, _ := os.UserHomeDir()
-	return newWindowSnapshot(ghosttyWindows, parseGhosttyWindows, "ghostty", home, gitToplevel)
+	return newGhosttySnapshot(ghosttySurfaces, ghosttyWindows, parseGhosttyWindows, home, gitToplevel)
 }
+
+// newGhosttySnapshot builds the Ghostty snapshot with seams for every
+// external input, so tests feed canned surfaces and titles without
+// touching osascript or git (see snapshot_test.go). The surface
+// listing and the title listing are separate seams because they fail
+// independently: a failed surface listing degrades to the title
+// snapshot, and a failed title listing under several instances only
+// drops the union, never the poll.
+func newGhosttySnapshot(listSurfaces func() ([]ghosttySurface, int, error), listTitles func() ([]string, bool, error), parseTitles func([]string, string) []vscodeWindow, home string, toplevel func(string) string) *WindowSnapshot {
+	surfaces, instances, err := listSurfaces()
+	if err != nil {
+		return newWindowSnapshot(listTitles, parseTitles, "ghostty", home, toplevel)
+	}
+	if instances == 0 {
+		// Ghostty not running is a definitive nothing-open — and the
+		// bridge never suffers AX culling, so unlike the title snapshot
+		// (see errListingEmpty) a running-but-empty listing is just as
+		// definitive: zero windows means zero windows.
+		return newSnapshotFromWindows(nil, nil, toplevel)
+	}
+	windows := ghosttySurfaceWindows(surfaces)
+	if instances > 1 {
+		if titles, running, err := listTitles(); err == nil && running {
+			windows = append(windows, parseTitles(titles, home)...)
+		}
+	}
+	return newSnapshotFromWindows(windows, nil, toplevel)
+}
+
+// ghosttySurfaceWindows turns a surface listing into the match
+// machinery's window records: one per surface with a directory, its
+// focus-coordinates key in Title and the directory in Path, so IsOpen
+// and IsOpenOnWorktree run their stages unchanged. A surface without
+// a directory (never reported one) matches nothing and is skipped.
 
 // newWindowSnapshot builds a snapshot from a window lister, a title
 // parser, and a work-tree-root resolver, split out from SnapshotVSCode
 // so tests can feed canned titles and roots without touching osascript
 // or git (see snapshot_test.go).
 func newWindowSnapshot(listWindows func() (titles []string, running bool, err error), parse func([]string, string) []vscodeWindow, app, home string, toplevel func(string) string) *WindowSnapshot {
-	// Memoize toplevel across IsOpen calls: several rows commonly sit
-	// under the same root, and each lookup is otherwise a git
-	// subprocess.
+	titles, running, err := listWindows()
+	switch {
+	case err != nil:
+		return newSnapshotFromWindows(nil, err, toplevel)
+	case running && len(titles) == 0:
+		return newSnapshotFromWindows(nil, errListingEmpty(app), toplevel)
+	default:
+		// The app not running is a definitive nothing-open, not an
+		// error: no window exists, culled or otherwise.
+		return newSnapshotFromWindows(parse(titles, home), nil, toplevel)
+	}
+}
+
+// newSnapshotFromWindows builds a snapshot from prebuilt window
+// records, memoizing the work-tree-root resolver across IsOpen calls
+// (several rows commonly sit under the same root, and each lookup is
+// otherwise a git subprocess). The constructors above decide the
+// records and the error state; this one only owns the memoization.
+func newSnapshotFromWindows(windows []vscodeWindow, err error, toplevel func(string) string) *WindowSnapshot {
 	tops := map[string]string{}
 	memo := func(dir string) string {
 		if t, ok := tops[dir]; ok {
@@ -90,19 +155,7 @@ func newWindowSnapshot(listWindows func() (titles []string, running bool, err er
 		tops[dir] = t
 		return t
 	}
-	titles, running, err := listWindows()
-	s := &WindowSnapshot{toplevel: memo}
-	switch {
-	case err != nil:
-		s.err = err
-	case running && len(titles) == 0:
-		s.err = errListingEmpty(app)
-	default:
-		// The app not running is a definitive nothing-open, not an
-		// error: no window exists, culled or otherwise.
-		s.windows = parse(titles, home)
-	}
-	return s
+	return &WindowSnapshot{windows: windows, err: err, toplevel: memo}
 }
 
 // Err reports whether reading the window listing failed (see

@@ -1,7 +1,26 @@
 package mycelium
 
-// Ghostty window identity is the window title, the same design the VS
-// Code path uses (see vscode.go): the dotfiles zsh title hook
+// Ghostty window identity is layered. The primary source is Ghostty's
+// own AppleScript surface listing (see ghosttySurfaces): every window,
+// tab, and split of the instance macOS resolves "Ghostty" to, each
+// with its tracked working directory reported as data, not prose. The
+// tracked directory is the surface's creation seed updated by every
+// OSC 7 report, and the dotfiles title hook reports OSC 7 at every
+// prompt from .zshrc (nested shells too, not only the surface's own
+// login shell), so the value follows the foreground shell. Matching
+// runs the shared stage order over those directories (see
+// matchGhosttySurfaces), and the winner is focused by its window id
+// and tab/terminal coordinates (ghosttyFocusSurface), so
+// identification and focus stay bound to the same surface.
+//
+// The System Events window-title layer (ghosttyWindows,
+// ghosttyWindowsDeep, matchGhosttyWindow, ghosttyRaiseWindow) is the
+// second source, kept for two things the bridge cannot do: it sees
+// EVERY running Ghostty instance (the bridge addresses exactly one),
+// and it works when the Ghostty automation permission is missing while
+// System Events automation is granted. Its identity is the window
+// title, the same design the VS Code path uses (see vscode.go): the
+// dotfiles zsh title hook
 // (~/.zsh_config/title.zsh) renders every surface's title as the git
 // work-tree root plus the branch, the same grammar VS Code's
 // window.title renders, and the session-title pi extension re-asserts
@@ -16,19 +35,28 @@ package mycelium
 // matchGhosttyWindow), then AXRaise the exact window whose title
 // matched, so identification and focus stay bound to the same window.
 //
-// The previous working-directory AppleScript match is gone on
-// purpose. `working directory` is a weak key: two surfaces cd'ed to
-// the same directory are indistinguishable, and a stale or divergent
-// value focuses the wrong window or opens a duplicate. Ghostty's
-// `tty` property, the exact key, still fails on the shipped 1.3.1
-// build ("Can't make tty of terminal id ... into type specifier"), so
-// titles are the strongest working identity. If `tty` ever starts
-// working reliably, switch to matching by tty.
 //
-// One known gap, accepted: System Events reports one title per window
-// (its focused surface), so a surface running in a background tab of
-// another window isn't listed by its own title. A miss opens a new
-// window, never a hijack.
+// The old reason `working directory` was rejected as a key — stale
+// values frozen at a surface's creation directory — died with that
+// per-prompt reporting: every surface a jump would want now carries a
+// current directory. What stays weak is only the ambiguity: two
+// surfaces cd'ed to the same directory are indistinguishable, so the
+// caller that needs the exact one passes a tty (canopy; see
+// matchGhosttySurfaces), and understory's worktree rows have no tty
+// and accept any window on the path.
+//
+// Ghostty builds expose the surface tty through AppleScript only
+// since upstream ghostty#11922, merged after the shipped 1.3.1
+// stable; on 1.3.1 the tty read fails at runtime and the listing
+// script's try-guard leaves "", so matching degrades to the path
+// stages exactly as before. When the running build gains the
+// property, tty matching starts working with no change here.
+//
+// One known gap of the title layer, accepted: System Events reports
+// one title per window (its focused surface), so a surface running in
+// a background tab of another window isn't listed by its own title. A
+// miss opens a new window, never a hijack. The surface layer has no
+// such gap, which is why it is primary.
 //
 // Another gap, handled: a title too long for its window is
 // head-truncated by the titlebar with a leading …
@@ -42,6 +70,7 @@ package mycelium
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -279,6 +308,243 @@ func windowPathMatches(windowPath, path string, toplevel func(string) string) bo
 		return true
 	}
 	return strings.HasPrefix(windowPath, path+string(filepath.Separator))
+}
+
+// ghosttySurface is one terminal surface as Ghostty's own AppleScript
+// reports it: the surface's tracked working directory (seed at
+// creation, updated by every OSC 7 report), plus the coordinates that
+// focus it again — its window's id and its tab/terminal positions.
+// tty carries the surface's short tty name ("ttys016", the form ps
+// reports) on Ghostty builds that expose the tty property (upstream
+// ghostty#11922, merged after 1.3.1); on builds without it the listing
+// script's try-guard leaves "" and matching degrades to the path
+// stages.
+type ghosttySurface struct {
+	windowID string
+	tabIdx   int
+	termIdx  int
+	dir      string
+	tty      string
+}
+
+// ghosttySurfaceKeySep is the byte the surface key and the listing
+// record share (unit separator, 0x1f).
+const ghosttySurfaceKeySep = "\x1f"
+
+// key encodes a surface's focus coordinates as the Title of a
+// match-machinery vscodeWindow, so matchVSCodeWindow runs unchanged
+// over surface-derived windows and returns the key the focus step
+// resolves back into coordinates. The directory rides in the
+// vscodeWindow's Path, the actual match key.
+func (s ghosttySurface) key() string {
+	return s.windowID + ghosttySurfaceKeySep + strconv.Itoa(s.tabIdx) + ghosttySurfaceKeySep + strconv.Itoa(s.termIdx)
+}
+
+// ghosttyProcessCount reports how many Ghostty processes are running.
+// It is the surface stage's not-running check, run through System
+// Events before any `tell application "Ghostty"` block so the stage
+// never LAUNCHES a Ghostty that isn't there: osascript resolves the
+// tell block's dictionary at compile time, and compiling against a
+// non-running app starts it. It also tells the caller whether the
+// title stage is even needed (see openGhostty: one instance means the
+// surface listing already saw everything the title stage could).
+func ghosttyProcessCount() (int, error) {
+	out, err := runOsascript(`tell application "System Events" to count of (every process whose name is "ghostty")`)
+	if err != nil {
+		return 0, err
+	}
+	n, perr := strconv.Atoi(out)
+	if perr != nil {
+		return 0, &AutomationError{Msg: "unparseable Ghostty process count: " + out}
+	}
+	return n, nil
+}
+
+// ghosttySurfaces lists every terminal surface of every Ghostty
+// window through Ghostty's own AppleScript bridge, plus the number of
+// running Ghostty processes (0 means Ghostty isn't running: no
+// surfaces, no error). Every tab and split of every window of the ONE
+// instance macOS resolves "Ghostty" to, no AX culling (the bridge
+// reads the app's own state, not the accessibility tree), and each
+// surface's tracked working directory as data. The bridge cannot see
+// other Ghostty instances; the title stage covers those (see
+// openGhostty and ghosttyWindows).
+//
+// The tty property is read inside a try-guard because builds without
+// it (1.3.1 stable; the property arrived upstream in ghostty#11922)
+// evaluate `tty of term` to a runtime error the try swallows, leaving
+// "". On builds with it the device path is stripped of its /dev/
+// prefix into the short form ps reports.
+func ghosttySurfaces() ([]ghosttySurface, int, error) {
+	instances, err := ghosttyProcessCount()
+	if err != nil {
+		return nil, 0, err
+	}
+	if instances == 0 {
+		return nil, 0, nil
+	}
+	out, err := runOsascript(`
+tell application "Ghostty"
+	set out to ""
+	set RS to (ASCII character 30)
+	set US to (ASCII character 31)
+	repeat with w in windows
+		set tIdx to 0
+		repeat with t in tabs of w
+			set tIdx to tIdx + 1
+			set eIdx to 0
+			repeat with term in terminals of t
+			set eIdx to eIdx + 1
+			set devTty to ""
+			try
+				set ttyPath to tty of term
+				if ttyPath starts with "/dev/" then
+					set devTty to text 6 thru -1 of ttyPath
+				end if
+			end try
+			set out to out & (id of w as text) & US & (tIdx as text) & US & (eIdx as text) & US & (working directory of term) & US & devTty & RS
+			end repeat
+		end repeat
+	end repeat
+	return out
+end tell
+`)
+	if err != nil {
+		return nil, instances, err
+	}
+	return parseGhosttySurfaces(out), instances, nil
+}
+
+// parseGhosttySurfaces decodes ghosttySurfaces' listing: RS-separated
+// records (0x1e), each US-separated (0x1f) into window id, tab index,
+// terminal index, working directory, and short tty name. Malformed
+// records are skipped, not fatal: a listing the script built field by
+// field can only lose whole records to a race (a window closed mid-
+// enumeration), and one lost record must not blind the whole stage.
+func parseGhosttySurfaces(raw string) []ghosttySurface {
+	var surfaces []ghosttySurface
+	for _, record := range strings.Split(raw, "\x1e") {
+		if record == "" {
+			continue
+		}
+		fields := strings.Split(record, "\x1f")
+		if len(fields) != 5 || fields[0] == "" {
+			continue
+		}
+		tabIdx, errTab := strconv.Atoi(fields[1])
+		termIdx, errTerm := strconv.Atoi(fields[2])
+		if errTab != nil || errTerm != nil {
+			continue
+		}
+		surfaces = append(surfaces, ghosttySurface{
+			windowID: fields[0],
+			tabIdx:   tabIdx,
+			termIdx:  termIdx,
+			dir:      fields[3],
+			tty:      fields[4],
+		})
+	}
+	return surfaces
+}
+
+// matchGhosttySurfaces finds the surface to focus on path. When tty is
+// given and the running Ghostty exposes the property (see
+// ghosttySurface), the one surface carrying that tty wins, with its
+// directory still checked against path so a recycled tty name can't
+// focus an unrelated window. Otherwise the surface directories run
+// through matchVSCodeWindow's stages unchanged (exact, work-tree root,
+// nested); the truncated-tail stage never fires because a surface's
+// path is data, never head-truncated prose. Surfaces without a
+// directory (never reported one) match nothing. The winner comes back
+// as decoded focus coordinates; the directory and tty were match
+// inputs only.
+func matchGhosttySurfaces(surfaces []ghosttySurface, path string, toplevel func(string) string, tty string) (ghosttySurface, bool) {
+	if tty != "" {
+		for _, s := range surfaces {
+			if s.tty == tty && windowPathMatches(s.dir, path, toplevel) {
+				return s, true
+			}
+		}
+	}
+	windows := ghosttySurfaceWindows(surfaces)
+	if key, ok := matchVSCodeWindow(windows, path, toplevel); ok {
+		if s, ok := parseGhosttySurfaceKey(key); ok {
+			return s, true
+		}
+	}
+	return ghosttySurface{}, false
+}
+
+// parseGhosttySurfaceKey decodes key()'s encoding back into focus
+// coordinates. The key crosses the match machinery as a vscodeWindow's
+// Title — a string handle — so the winner comes back as a key, not a
+// surface; the directory and tty rode along only for matching and stay
+// empty here. Focusing needs the coordinates alone.
+func parseGhosttySurfaceKey(key string) (ghosttySurface, bool) {
+	parts := strings.Split(key, ghosttySurfaceKeySep)
+	if len(parts) != 3 || parts[0] == "" {
+		return ghosttySurface{}, false
+	}
+	tabIdx, errTab := strconv.Atoi(parts[1])
+	termIdx, errTerm := strconv.Atoi(parts[2])
+	if errTab != nil || errTerm != nil {
+		return ghosttySurface{}, false
+	}
+	return ghosttySurface{windowID: parts[0], tabIdx: tabIdx, termIdx: termIdx}, true
+}
+
+// ghosttySurfaceWindows turns a surface listing into the match
+// machinery's window records (see SnapshotGhostty): one per surface
+// with a directory, its focus-coordinates key in Title and the
+// directory in Path, so IsOpen and IsOpenOnWorktree run their stages
+// unchanged. A surface without a directory (never reported one) is
+// skipped: nothing solid to match on.
+func ghosttySurfaceWindows(surfaces []ghosttySurface) []vscodeWindow {
+	windows := make([]vscodeWindow, 0, len(surfaces))
+	for _, s := range surfaces {
+		if s.dir == "" {
+			continue
+		}
+		windows = append(windows, vscodeWindow{Title: s.key(), Path: s.dir})
+	}
+	return windows
+}
+
+// ghosttyFocusSurface focuses the surface at these coordinates:
+// Ghostty's `focus` command selects the surface's tab and raises its
+// window, so the focus binds to the exact surface that matched — no
+// re-matching by title in between, the same guarantee the title path's
+// AXRaise-by-exact-title gives. A window that vanished between the
+// listing and the focus reports errAENoSuchObject (-1728) and counts
+// as a miss (the caller opens a fresh window); other errors surface,
+// because the window is known to be open and opening a new one would
+// stack the duplicate this library exists to prevent.
+func ghosttyFocusSurface(s ghosttySurface) (bool, error) {
+	script := `
+tell application "Ghostty"
+	activate
+	focus (terminal ` + strconv.Itoa(s.termIdx) + ` of tab ` + strconv.Itoa(s.tabIdx) + ` of window id "` + escapeForAppleScript(s.windowID) + `")
+end tell
+return "true"
+`
+	out, err := runOsascript(script)
+	if err != nil {
+		if isNoSuchObjectError(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return out == "true", nil
+}
+
+// isNoSuchObjectError reports whether err is errAENoSuchObject, the
+// error a vanished window/tab/terminal specifier produces (-1728,
+// "Can't get ..." or its typographic-apostrophe twin).
+func isNoSuchObjectError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "-1728") ||
+		strings.Contains(msg, "Can't get") ||
+		strings.Contains(msg, "Can\u2019t get")
 }
 
 // ghosttyRaiseWindow brings the Ghostty window with this exact title to

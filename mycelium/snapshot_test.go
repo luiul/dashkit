@@ -323,3 +323,180 @@ func TestGhosttySnapshotDropsTooWeakTruncatedTitles(t *testing.T) {
 		t.Fatal("IsOpen true on a tail with no element boundary")
 	}
 }
+
+// ghosttySnapshotWithSurfaces builds a Ghostty snapshot over a canned
+// surface listing of a running single-instance Ghostty, the way
+// SnapshotGhostty prefers on a real system. The title seam fails loudly
+// so a test that falls into it by accident says so instead of passing
+// on title data.
+func ghosttySnapshotWithSurfaces(surfaces []ghosttySurface, toplevel func(string) string) *WindowSnapshot {
+	return newGhosttySnapshot(
+		func() ([]ghosttySurface, int, error) { return surfaces, 1, nil },
+		func() ([]string, bool, error) { return nil, true, errors.New("title listing: surfaces own this test") },
+		parseGhosttyWindows, testHome, toplevel,
+	)
+}
+
+// TestGhosttySnapshotSurfacesDriveTheOpenColumn pins what motivated
+// the surface snapshot: a worktree running in a split whose title is
+// locked to a label, or in a background tab, is invisible to every
+// title listing but open in the column, because its tracked working
+// directory — data, not prose — names the path. The strict
+// IsOpenOnWorktree keeps its prefix-boundary discipline over surface
+// directories, and a surface without a directory stays invisible.
+func TestGhosttySnapshotSurfacesDriveTheOpenColumn(t *testing.T) {
+	surfaces := []ghosttySurface{
+		{windowID: "w1", tabIdx: 1, termIdx: 1, dir: "/Users/x/worktrees/canopy"}, // locked-title split
+		{windowID: "w1", tabIdx: 2, termIdx: 1, dir: "/Users/x/dotfiles"},         // background tab
+		{windowID: "w3", tabIdx: 1, termIdx: 1, dir: ""},                          // never reported: invisible
+	}
+	s := ghosttySnapshotWithSurfaces(surfaces, fakeToplevel("/Users/x/worktrees/canopy", "/Users/x/dotfiles"))
+
+	for _, path := range []string{
+		"/Users/x/worktrees/canopy",
+		"/Users/x/worktrees/canopy/pkg-a", // root stage: the window is on the work-tree root
+		"/Users/x/dotfiles",
+		"/Users/x/dotfiles/sub", // root stage: the window is on the checkout's root
+	} {
+		if !s.IsOpen(path) {
+			t.Fatalf("IsOpen(%q) false, want true", path)
+		}
+	}
+	if s.IsOpen("/Users/x/never-reported") {
+		t.Fatal("IsOpen true for a surface that never reported a directory")
+	}
+
+	if !s.IsOpenOnWorktree("/Users/x/worktrees/canopy") {
+		t.Fatal("IsOpenOnWorktree false for the split's own worktree")
+	}
+	if s.IsOpenOnWorktree("/Users/x/worktrees/canopy-sibling") {
+		t.Fatal("IsOpenOnWorktree true on a prefix sibling")
+	}
+}
+
+// TestSnapshotAgreesWithOpenGhosttyOnSurfaces is the surface twin of
+// TestSnapshotAgreesWithOpenGhostty: over one shared surface listing,
+// the poll's open column and Enter's open-or-focus must give the same
+// answer for every path, because both run the same stages over the same
+// data.
+func TestSnapshotAgreesWithOpenGhosttyOnSurfaces(t *testing.T) {
+	surfaces := []ghosttySurface{
+		{windowID: "w1", tabIdx: 1, termIdx: 1, dir: "/Users/x/dotfiles"},
+		{windowID: "w2", tabIdx: 1, termIdx: 1, dir: "/Users/x/worktrees/canopy"},
+		{windowID: "w3", tabIdx: 1, termIdx: 1, dir: ""},
+	}
+	toplevel := fakeToplevel("/Users/x/worktrees/canopy")
+
+	d := fakeDeps()
+	d.ghosttySurfaces = func() ([]ghosttySurface, int, error) { return surfaces, 1, nil }
+	d.toplevel = toplevel
+	d.focusGhosttySurface = func(ghosttySurface) (bool, error) { return true, nil }
+	openedNew := false
+	d.ghosttyOpenNewWindow = func(string) error { openedNew = true; return nil }
+
+	s := ghosttySnapshotWithSurfaces(surfaces, toplevel)
+
+	for _, path := range []string{
+		"/Users/x/dotfiles",
+		"/Users/x/dotfiles/sub",
+		"/Users/x/worktrees/canopy",
+		"/Users/x/worktrees/canopy/pkg-a",
+		"/Users/x/nowhere",
+	} {
+		openedNew = false
+		result := openGhostty(d, "", path)
+		if !result.OK {
+			t.Fatalf("openGhostty(%q) failed: %+v", path, result)
+		}
+		wouldFocus := !openedNew
+		if got := s.IsOpen(path); got != wouldFocus {
+			t.Fatalf("IsOpen(%q) = %v, but OpenGhostty wouldFocus = %v", path, got, wouldFocus)
+		}
+	}
+}
+
+// TestGhosttySnapshotNotRunningIsDefinitiveClosed pins the improvement
+// over the title snapshot: Ghostty not running means no window exists,
+// culled or otherwise, so Err stays nil and the column reads closed —
+// never the "can't tell" the AX-culled title listing forced.
+func TestGhosttySnapshotNotRunningIsDefinitiveClosed(t *testing.T) {
+	s := newGhosttySnapshot(
+		func() ([]ghosttySurface, int, error) { return nil, 0, nil },
+		func() ([]string, bool, error) { return nil, false, nil },
+		parseGhosttyWindows, testHome, fakeToplevel(),
+	)
+	if s.Err() != nil {
+		t.Fatalf("Err = %v, want nil (not running is definitive)", s.Err())
+	}
+	if s.IsOpen("/Users/x/dotfiles") {
+		t.Fatal("IsOpen true with Ghostty not running")
+	}
+}
+
+// TestGhosttySnapshotRunningWithNoWindowsIsDefinitiveClosed pins the
+// other half of the culling fix: the bridge reads the app's own state,
+// so a running-but-empty listing means the app genuinely has no
+// windows. The title snapshot's errListingEmpty "can't tell" was an
+// AX-cull artifact that no longer applies here.
+func TestGhosttySnapshotRunningWithNoWindowsIsDefinitiveClosed(t *testing.T) {
+	s := newGhosttySnapshot(
+		func() ([]ghosttySurface, int, error) { return nil, 1, nil },
+		func() ([]string, bool, error) { return nil, true, nil },
+		parseGhosttyWindows, testHome, fakeToplevel(),
+	)
+	if s.Err() != nil {
+		t.Fatalf("Err = %v, want nil (the bridge never culls)", s.Err())
+	}
+	if s.IsOpen("/Users/x/dotfiles") {
+		t.Fatal("IsOpen true with no windows open")
+	}
+}
+
+// TestGhosttySnapshotSurfaceErrorFallsBackToTitles pins the fallback
+// that keeps the old behavior when the bridge is unavailable (the
+// Ghostty automation permission, a bridge error): the System Events
+// title snapshot answers the poll instead, culling caveat and all —
+// including its errListingEmpty "can't tell" state.
+func TestGhosttySnapshotSurfaceErrorFallsBackToTitles(t *testing.T) {
+	titles := []string{"~/dotfiles • main"}
+	s := newGhosttySnapshot(
+		func() ([]ghosttySurface, int, error) { return nil, 0, errors.New("bridge denied") },
+		func() ([]string, bool, error) { return titles, true, nil },
+		parseGhosttyWindows, testHome, fakeToplevel(),
+	)
+	if !s.IsOpen("/Users/x/dotfiles") {
+		t.Fatal("IsOpen false, want the title fallback to answer")
+	}
+
+	empty := newGhosttySnapshot(
+		func() ([]ghosttySurface, int, error) { return nil, 0, errors.New("bridge denied") },
+		func() ([]string, bool, error) { return nil, true, nil },
+		parseGhosttyWindows, testHome, fakeToplevel(),
+	)
+	if empty.Err() == nil {
+		t.Fatal("the title fallback's empty-listing state must stay an error, not a clean closed")
+	}
+	if empty.IsOpen("/Users/x/dotfiles") {
+		t.Fatal("IsOpen true under a failed listing")
+	}
+}
+
+// TestGhosttySnapshotMultiInstanceUnionsTitles pins the multi-instance
+// union: the bridge addresses exactly one Ghostty instance, so with
+// several running, the snapshot adds the System Events title windows
+// to the surface windows and the poll sees both.
+func TestGhosttySnapshotMultiInstanceUnionsTitles(t *testing.T) {
+	s := newGhosttySnapshot(
+		func() ([]ghosttySurface, int, error) {
+			return []ghosttySurface{{windowID: "w1", tabIdx: 1, termIdx: 1, dir: "/Users/x/dotfiles"}}, 2, nil
+		},
+		func() ([]string, bool, error) { return []string{"~/worktrees/canopy • feat/y"}, true, nil },
+		parseGhosttyWindows, testHome, fakeToplevel("/Users/x/worktrees/canopy"),
+	)
+	if !s.IsOpen("/Users/x/dotfiles") {
+		t.Fatal("IsOpen false for the surface-derived window")
+	}
+	if !s.IsOpen("/Users/x/worktrees/canopy") {
+		t.Fatal("IsOpen false for the title-derived window of the other instance")
+	}
+}

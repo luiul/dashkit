@@ -64,6 +64,8 @@ type deps struct {
 	vscodeWindows        func() (titles []string, running bool, err error)
 	raiseWindow          func(title string) (bool, error)
 	activateCode         func() error
+	ghosttySurfaces      func() (surfaces []ghosttySurface, instances int, err error)
+	focusGhosttySurface  func(s ghosttySurface) (bool, error)
 	ghosttyWindows       func() (titles []string, running bool, err error)
 	ghosttyWindowsDeep   func() (titles []string, running bool, err error)
 	raiseGhosttyWindow   func(title string) (bool, error)
@@ -93,6 +95,8 @@ func defaultDeps() deps {
 			return h
 		},
 		toplevel:             gitToplevel,
+		ghosttySurfaces:      ghosttySurfaces,
+		focusGhosttySurface:  ghosttyFocusSurface,
 		ghosttyWindows:       ghosttyWindows,
 		ghosttyWindowsDeep:   ghosttyWindowsDeep,
 		raiseGhosttyWindow:   ghosttyRaiseWindow,
@@ -243,19 +247,29 @@ func openVSCodeAppFallback(d deps, path string) Result {
 	return Result{false, stderr}
 }
 
-// OpenGhostty focuses a Ghostty window whose title names path (the
-// path itself, its git work-tree root, or a folder inside its tree —
-// the same match stages OpenVSCode runs, see matchVSCodeWindow), or
-// opens a brand-new window there when nothing open matches (e.g. that
-// window has since been closed).
+// OpenGhostty focuses a Ghostty window on path (the path itself, its
+// git work-tree root, or a folder inside its tree — the same match
+// stages OpenVSCode runs, see matchVSCodeWindow), or opens a
+// brand-new window there when nothing open matches (e.g. that window
+// has since been closed).
+//
+// Identity is layered (see ghostty.go): the primary stage asks
+// Ghostty's own AppleScript for every surface's tracked working
+// directory and focuses the matching surface by its window id and
+// coordinates — every tab and split of every window, no AX culling, no
+// title parsing. The title stage behind it (System Events window
+// names) covers what the bridge cannot see: other Ghostty instances,
+// and a missing Ghostty automation permission.
 //
 // tty is the exact surface identity when the caller knows it (canopy
-// does: it resolves every agent's tty via ps): a window whose title
-// carries that tty wins over same-path windows, so two agents side by
-// side in the same location each jump to their own window. Pass "" for
-// path-only matching (understory's rows are worktrees, not agent
-// processes, so they have no tty); a tty that matches no window
-// falls back to the path match too.
+// does: it resolves every agent's tty via ps): the surface whose tty
+// matches wins over same-path surfaces when the running Ghostty
+// exposes the property (upstream ghostty#11922; on 1.3.1 it degrades
+// to the path stages), and the window whose title carries that tty
+// wins in the title stage. Pass "" for path-only matching
+// (understory's rows are worktrees, not agent processes, so they have
+// no tty); a tty that matches nothing falls back to the path match
+// too.
 func OpenGhostty(tty, path string) Result {
 	return openGhostty(defaultDeps(), tty, path)
 }
@@ -265,6 +279,35 @@ func openGhostty(d deps, tty, path string) Result {
 		return Result{false, "No known path to focus."}
 	}
 
+	// Surface stage: Ghostty's own AppleScript reports every surface
+	// with its tracked working directory (see ghosttySurfaces). A
+	// failure here — the Ghostty automation permission, a bridge error
+	// — is not fatal: it skips straight to the title stage, which is
+	// the older, broader fallback and surfaces its own errors.
+	surfaces, instances, err := d.ghosttySurfaces()
+	if err == nil {
+		if instances == 0 {
+			// Not running is definitive: nothing to focus anywhere, and
+			// the title stage would pay two osascript round-trips to
+			// learn the same.
+			return openNewGhosttyWindow(d, path)
+		}
+		if s, ok := matchGhosttySurfaces(surfaces, path, d.toplevel, tty); ok {
+			return focusGhosttySurfaceWindow(d, s, path)
+		}
+		if instances == 1 {
+			// One instance: the surface listing already saw every
+			// window, tab, and split it has, through the app's own state
+			// with no AX culling (luiul/dashkit#9). The title stage sees
+			// strictly less (one name per window, culled when
+			// backgrounded) and its deep relisting churns focus for
+			// nothing. Miss means miss.
+			return openNewGhosttyWindow(d, path)
+		}
+	}
+
+	// Title stage: other Ghostty instances the bridge can't address,
+	// or the surface stage was unavailable.
 	title, found, err := findGhosttyWindow(d, tty, path)
 	if err != nil {
 		return Result{false, err.Error()}
@@ -275,8 +318,28 @@ func openGhostty(d deps, tty, path string) Result {
 	return openNewGhosttyWindow(d, path)
 }
 
+// focusGhosttySurfaceWindow is the surface stage's focus half, the
+// twin of focusGhosttyWindow: a surface that vanished between listing
+// and focus counts as a miss and opens a fresh window; a focus ERROR
+// surfaces rather than falling through, because the window is known
+// open and a second one would stack the duplicate this library
+// exists to prevent.
+func focusGhosttySurfaceWindow(d deps, s ghosttySurface, path string) Result {
+	raised, err := d.focusGhosttySurface(s)
+	if err != nil {
+		return Result{false, err.Error()}
+	}
+	if !raised {
+		return openNewGhosttyWindow(d, path)
+	}
+	return Result{true, "Focused Ghostty window for " + path + "."}
+}
+
 // findGhosttyWindow is Ghostty's findVSCodeWindow: the exact title of
-// an open Ghostty window matched on path. A matchless listing while
+// an open Ghostty window matched on path. It is the TITLE stage of
+// openGhostty — run when the surface stage was unavailable, or after a
+// surface miss under several running Ghostty instances, whose windows
+// only this System Events listing can see. A matchless listing while
 // Ghostty runs is not believed: macOS culls the AX tree of a
 // backgrounded app (luiul/dashkit#9), and with several Ghostty
 // instances a plain listing reliably sees only the frontmost one's
