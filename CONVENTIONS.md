@@ -1,347 +1,125 @@
-# Conventions
+# Tool conventions
 
-The decisions, conventions, and best practices shared by
-[canopy](https://github.com/luiul/canopy),
-[understory](https://github.com/luiul/understory), and this repo, stated
-once so each project's own docs can stay about what that project does.
+TLDR: Build small tools with clear boundaries, predictable behavior, and safe defaults. Keep entry points thin, collect data before rendering, measure performance, and test without disturbing live work. Share proven primitives, not whole application frameworks.
 
-These are living rules. They came out of real bugs, real drift between
-the two dashboards, and one consistency pass
-([understory#4](https://github.com/luiul/understory/issues/4)) that
-wrote them down. When a new decision applies to more than one repo, add
-it here.
+## Scope and use
 
-## Shared behavior lives in dashkit
+This is the shared guide for the tools in the `luiul` GitHub account, including [dashkit](https://github.com/luiul/dashkit), [canopy](https://github.com/luiul/canopy), [understory](https://github.com/luiul/understory), and [Coppice](https://github.com/luiul/coppice).
+Apply the general rules everywhere. Apply dashboard and language rules only where they fit.
+These are review criteria, not a claim that every current tool already meets them.
 
-The meta-convention behind everything else: anything both dashboards
-need exists exactly once, here, never copied into both trees to quietly
-drift apart. The app repos keep only domain specifics: their binding
-tables, prompt texts, verbs, and the dispatch each confirmation runs.
-Everything else (the modal state machine, the help overlay renderer,
-table coloring, column resizing, window open-or-focus) is a dashkit
-package both apps import.
+- Read the relevant sections before changing code. Keep existing behavior unless the task explicitly changes it.
+- Record project-specific behavior and deliberate exceptions in that project's docs. Do not silently weaken safety rules.
+- Keep this file about decisions. Put API details, examples, and bug history in package READMEs or `docs/`, then link here.
+- Follow the [global agent instructions](https://github.com/luiul/dotfiles/blob/main/pi/.pi/agent/AGENTS.md) for approval, worktrees, publication, and deployment. This guide does not grant those permissions.
 
-This is also why dashkit is one repo rather than per-package repos:
-every package in it serves the same two consumers for the same reason,
-and the go.mod/tag/README overhead of splitting them bought nothing (see
-History in the README).
+## Code structure
 
-## Keybindings
+- **One clear responsibility per module or package.** Split by reasons to change, not an arbitrary line limit. Avoid catch-all utility modules and unnecessary layers.
+- **Thin entry points.** Parse arguments and wire dependencies there. Put command workflows in cohesive handlers, not in argument declarations or renderers.
+- **Separate collection, decisions, presentation, and mutations.** Collect external data once per needed target. Apply state rules to prepared values. Rendering must not launch commands or walk directories.
+- **Share stable primitives.** Go dashboards use dashkit for confirmation, filtering, rendering, layout, and window helpers. Keep domain bindings, prompt text, selection rules, and action dispatch in the apps.
+- **Do not force cross-language reuse.** Python tools follow the same behavior contracts without importing a Go library. Share vocabulary and tests where useful, not duplicated implementation assumptions. When a port is unavoidable, name its source of truth and pin the shared contract with fixtures.
+- **Use explicit boundary types.** Validate external replies. Distinguish missing data, failed checks, and empty results. Keep internal types small; avoid a model hierarchy without a concrete need.
+- **Keep dependencies pointing inward.** State rules must not import CLI or dashboard code. External integrations should not depend on presentation.
 
-One set of keybinding conventions across both dashboards, so muscle
-memory transfers:
+For Go apps, `cmd/` is thin and application-only packages belong under `internal/`. Dashkit's public packages remain independently importable.
+For new packaged Python CLIs, prefer a `src/` layout. Preserve established layouts unless a measured or maintenance need justifies migration. Keep parser definitions separate from substantial workflows. Use `uv` for Python operations.
 
-- **Lowercase keys act on the selected row or are reversible**: `x`,
-  `c`, `p`, `y`, `m`.
-- **Uppercase keys are the bulk or stronger form of their lowercase
-  sibling**: `X`, `C`, `D`, `P`, `M`.
-- **No key means different things in the two apps.** When a collision is
-  found, the minority usage moves (understory's prune moved `p` to `P`,
-  copy moved `c` to `y`, vim's "yank"), the majority usage stays.
-- **Reserved and identical everywhere**: `enter` is the primary action,
-  `?` opens help, `r` refreshes, `q` quits, `/` filters the rows, and
-  `ctrl+c` always quits: from the table, from a modal, from the help
-  overlay, from the filter input. The simplest possible invariant to
-  state.
-- **`/` filters the rows, identically in both apps** (see
-  [sieve](sieve/) for the matching rule): `/` focuses the filter input
-  (seeded with the applied query), typing narrows the rows, every
-  printable key is query text while the input is focused, `enter` keeps
-  its row action mid-filter, `esc` leaves the input with the filter
-  still applied, and `esc` in normal mode clears it. The semantics
-  mirror jira-today's fzf picker, except its `c`-to-clear: `c` is
-  canopy's dismiss, and the no-key-means-two-things rule above wins
-  over matching fzf exactly.
-- **Verbs stay domain-correct** rather than forced-identical: `enter` is
-  "open/focus" in understory (a worktree window) and "jump" in canopy (a
-  session's window); canopy's `c` is "dismiss".
-- Navigation is whatever `bubbles/table` provides, documented
-  identically in both help overlays: `↑/↓, k/j` move, `pgup/pgdn, b/f`
-  page, `u/d` half page, `g/G, home/end` top/bottom.
+## Safety and external state
 
-## The confirmation modal
+- **Uncertainty is not success.** A failed scan must not look like an empty result. Refuse a destructive action when a required identity or preservation check fails.
+- **Revalidate before acting.** Use stable identity, not a row index, basename, title substring, or PID alone. Check the target's current eligibility after confirmation.
+- **Preserve work.** Protect dirty, parked, current, and protected worktrees according to the command's contract. Review valuable ignored files before removal. Force and yes flags do not bypass mandatory guards.
+- **Respect ownership.** For repos managed by Worktrunk (`wt`), `wt` owns worktree paths, lifecycle, and hooks. Orchestrators own agent sessions. Never replace those owners with a second competing implementation.
+- **Bound external work.** Set deadlines, cap concurrency, and define cancellation and child cleanup. Ctrl-C must stop the tool promptly, with a bounded cleanup. Every background task needs an owner and an explicit shutdown or expiry rule.
+- **Keep reads honest.** Read commands avoid writes. If a read self-heals state, such as pruning a stale registry entry, document it and report it. A dry run changes no worktree, branch, or setting. If it refreshes remote-tracking refs to preview accurately, document that cache effect.
+- **Fail loudly at startup.** Check the platform and required tools first, then exit with a clear error. A failed scan shows a warning, never an empty result.
+- **Persist only owned state.** Examples include preferences, acknowledgements, and retry records. Make writes safe under interruption and concurrent access. Do not treat cached observations as fresh proof for destructive actions.
 
-Every destructive action asks first, and both apps ask the same way. The
-state machine lives in [confirm](confirm/README.md); the discipline is:
+Process actions check PID and start time or lifetime against a fresh snapshot.
+Worktree identity is its path; branch is a ref, not a location. Resolve the caller's current worktree independently of a subprocess's working directory.
+Window actions bind identification and focus to the same verified window. Never call `code --reuse-window`; it can focus an unrelated window.
+Canopy and Understory open or focus Ghostty. Preserve their existing opener and title matching fallback; changing matching is not convention cleanup. See the [dashkit README](README.md) for the current window APIs.
 
-- **`y` confirms; `n`, `esc`, or `enter` cancel; every other key is
-  swallowed; `ctrl+c` quits.** Enter cancels because the prompt says
-  `[y/N]`: the capitalized letter is the default answer, and enter
-  selects it. Swallowing everything else means the state the prompt
-  describes cannot shift under an in-flight answer: impossible to
-  confirm or cancel by accident.
-- **An unanswered prompt cancels itself after 10s**
-  (`confirm.Timeout`), because rows keep repolling and reordering
-  underneath it.
-- **Every resolved prompt notifies.** A confirm ends in the action's
-  own result notification ("terminated pi (pid 86872)"), a cancel
-  answers with "cancelled", and the timeout's cancel carries its
-  reason ("cancelled: no answer within 10s"). A quiet cancel would
-  read exactly like a swallowed keypress: with every other key
-  swallowed, the user could not tell whether their `n` landed or the
-  prompt is still armed. The cancel text is shared from the confirm
-  package (`confirm.CancelText`), like `confirm.TimeoutText`, so the
-  two apps phrase it identically.
-- **Every poll revalidates the armed prompt's targets**
-  (`confirm.Refresh`): targets that vanished from the fresh poll drop
-  out, survivors are re-stamped with their fresh copies (a current
-  uptime sample is what canopy's process-identity guard compares
-  against), and a prompt left with nothing to act on cancels itself.
-- **Color tiers**: yellow for the ordinary destructive action (`x`,
-  `P`, `M`, `D`), red for the force tier (`X`).
-- **The mouse is guarded**: drags are ignored while a prompt (or the
-  help overlay) is open.
-- **The payload and the prompt text stay with the caller.**
-  `confirm.State[T]` holds the app's own type (a worktree batch plus
-  removal kind, a process list plus signal); the package owns only the
-  modal machinery around it.
+## CLI contracts
 
-## Phrasing
+- Keep names, flags, defaults, and exit codes stable. Exit zero only on success. Exit non-zero on failure, including partial failure. New behavior must not quietly change an existing command's scope.
+- Primary results go to stdout. Errors and progress go to stderr. Machine output must contain only the documented data, without prompts, spinners, ANSI styles, or extra prose.
+- Offer machine output when callers need it. Treat its fields and meaning as a compatibility contract; validate changes with fixtures.
+- Prompt only when stdin is a terminal. Otherwise require explicit options or return a clear error; never hang on a prompt. Keep real terminal input separate from piped data.
+- Explain destructive scope and consequences before confirmation. Cancellation must be visible and must not perform the action.
+- Report partial failure honestly. A created worktree with a failed handoff is not a completed handoff. Give a safe retry when possible.
+- Disable color when the output stream is not a terminal, `TERM=dumb`, or `NO_COLOR` is set and non-empty. Explicit user color options can override these defaults. `NO_COLOR` disables color, not every ANSI attribute. A tool's `--no-color` option must honor its documented promise. Machine output is always unstyled.
+- Measure terminal display cells, not bytes or string length. Use a maintained width library (Go: `go-runewidth` and `x/ansi`; Python: Rich `cell_len` or `wcwidth`), not hand-built tables, and never split a grapheme cluster. Truncate paths toward their identifying tail. Match and filter full values, not shortened labels.
 
-One voice across notifications, prompts, footers, and help text:
+Reference: [Command Line Interface Guidelines](https://clig.dev/) and the [NO_COLOR contract](https://no-color.org/).
 
-- **Notifications are terse lowercase fragments with no trailing
-  period**, matching the voice the footers already use: "terminated pi
-  (pid 86872)", "no stale worktrees to prune", "copied ~/worktrees/…",
-  "cancelled".
-  Result notifications may carry detail (signal names, `wt`'s own
-  refusal reason, a hint at `X` when a dirty worktree was refused).
-- **Prompts follow one template**: `<Verb> <target>? <Consequence
-  sentence>. [y/N]`. Plain verbs in prompts, never signal names
-  ("Terminate pi (pid 42, ~/path)? Currently working. [y/N]"); signal
-  names stay in result notifications. One verb per operation, even
-  across single and batch forms ("Prune" for both the single stale
-  registration and the batch).
-- **One user-facing word per action**, the same in the footer, the help
-  overlay, and the README ("dismiss", not "complete" here and "mark
-  seen" there). Code may keep its own domain term (canopy's code says
-  "acknowledge").
-- **The footer hint line lists only the few most-used bindings**, in a
-  fixed format: `↑/↓ move · enter <verb> · <domain keys> · ? help · q
-  quit`.
+## Language and documentation
 
-## The help overlay
+- Use simple words, short active sentences, and one idea at a time. No filler or punctuation dashes. Do not hard-wrap Markdown prose at a fixed column.
+- Use one user-facing word per action across help, output, and docs. Each repo keeps a `docs/glossary.md` and uses its terms verbatim. Say "open or focus" for windows; reserve "reuse" for VS Code's own `--reuse-window` flag.
+- Start substantial reports and guides with `TLDR:`. Omit empty sections. Separate required next steps from optional ideas.
+- Dashboard notifications are lowercase fragments without trailing periods, such as "cancelled" or "no stale worktrees to prune". CLI prose can use complete sentences.
+- Confirmation prompts state the action, target, and consequence: `<Verb> <target>? <Consequence>. [y/N]`. Keep result details separate from the question.
+- API docs explain behavior, inputs, errors, side effects, and concurrency guarantees where relevant. Internal comments explain non-obvious reasons and constraints, not a line-by-line translation of code.
+- READMEs cover usage and deliberate omissions. Package READMEs cover responsibilities and examples. Use full clickable URLs for every online resource, issue, and PR, never a bare `repo#12`.
+- Diagrams follow the [dotfiles diagram convention](https://github.com/luiul/dotfiles/blob/main/docs/diagrams.md): one `.drawio.svg` per diagram with its source embedded. Never paste raw draw.io XML or Mermaid into Markdown.
+- Approved multi-step personal work belongs in GitHub issues with verifiable acceptance criteria, not root-level plan files. Tracker creation and commits still need the approvals in the global instructions.
 
-`?` opens the full keybinding list, rendered by `loam.HelpView` in both
-apps so the two cannot drift:
+## Dashboard interaction
 
-- The header stays visible (app identity), the body swaps to the list,
-  the footer carries the close hint: "press any key to close".
-- The title is "keybindings". Any key closes the overlay; `ctrl+c`
-  quits (per the invariant above).
-- Key-column padding is runewidth-aware (display width, not byte
-  length), so the multi-byte `↑/↓` glyphs don't skew the description
-  column.
-- The list covers every binding `Update` handles, the full navigation
-  set, and the one mouse-only interaction, verbatim in both apps: key
-  "mouse", description "drag a column border on the header row to
-  resize the two columns it joins". The `?` entry reads "this help";
-  the quit entry is `q, ctrl+c`.
-- Each app keeps only its own binding table (`[]loam.HelpBinding`) and
-  the surrounding header/footer composition.
+These rules apply to interactive row-based dashboards, not to every CLI.
 
-## CLI help text
+- Keep shared keys consistent: `enter` is the primary row action, `?` help, `r` refresh, `q` quit, and `/` filter. `ctrl+c` quits from every mode.
+- Lowercase action keys normally affect one row or a reversible action. Uppercase keys are the bulk or stronger form where that relationship exists.
+- No shared action key means different operations across Canopy and Understory. Resolve collisions across apps, not just within one. The primary row action keeps its domain-specific verb.
+- Keep verbs domain-correct. Opening a worktree and jumping to a session are related primary actions, not identical operations.
+- Filter input consumes printable keys as query text. `/` seeds the applied query; `enter` retains the primary action; `esc` leaves input without clearing, then clears the filter in normal mode. Matching lives in [sieve](sieve/).
+- Document the complete navigation set supported by the pinned table dependency. Footer hints show only common actions: `↑/↓ move · enter <verb> · <domain keys> · ? help · q quit`.
+- Help uses the shared renderer and each app's binding table. Keep the header visible, title it "keybindings", and close on any key except `ctrl+c`, which quits.
 
-Both `cmd/*/main.go` help texts use the same paragraph skeleton and the
-same granularity (arrows, `enter`, the destructive key, `r`, `q`), and
-point at `?` for the full list instead of duplicating it. The overlay
-is the source of truth; the CLI text is a summary.
+Destructive dashboard actions use [confirm](confirm/README.md):
 
-## Table rendering (loam)
+- `y` confirms. `n`, `esc`, and `enter` cancel. Other keys are swallowed; `ctrl+c` quits. Unanswered prompts cancel after `confirm.Timeout` (currently 10 seconds).
+- Revalidate armed targets on each poll and immediately before mutation. Cancel if no eligible targets remain. Ignore table drags while confirmation or help is open.
+- Every resolution reports a result. Use the shared explicit-cancel and timeout text. Yellow marks ordinary destructive actions; red marks force actions.
 
-Hard-won rendering rules, each with a bug behind it:
+## Dashboard rendering and polling
 
-- **Never put ANSI-styled strings into `table.Row`.** bubbles/table
-  v1's truncation (`runewidth.Truncate`) is not ANSI-aware: escape
-  codes count as visible width and get sliced mid-sequence, corrupting
-  the row. Post-process the table's already-rendered plain-text view
-  instead (`loam.ColorizeRows`), so the table's own width math always
-  runs over plain text.
-- **The selected row is a full-width subtle background, not a leading
-  marker column.** The row is marked with a zero-width Unicode sentinel
-  (`loam.Tag`) in an always-populated, never-truncated column;
-  `ColorizeRows` finds it in the rendered text (bubbles/table v1
-  doesn't expose scroll offset), highlights the line, and strips the
-  tag back out before returning.
-- **Nested ANSI styles need their outer style reapplied.** Every
-  lipgloss render ends with a full SGR reset, which kills any outer
-  style wrapped around it; `loam.HighlightRow` reapplies its opening
-  sequence after every inner reset it finds.
-- **All width math is display width, never byte length**: runewidth for
-  padding, `x/ansi.Cut` for slicing styled lines. Multi-byte runes (the
-  `↑/↓` glyphs, truncation ellipses, unicode names) otherwise misalign
-  every later column.
-- **Header borders are drawn on the header row only**
-  (`loam.DrawHeaderBorders`): data rows may already carry ANSI from
-  coloring, the header never does, so marking only the header sidesteps
-  the nesting hazard while giving mouse drags something visible to aim
-  at.
-- **`--no-color` / `NO_COLOR` yields plain text** in both apps.
-- **Long free text that belongs to a row goes on an attached detail
-  line under it, never in a third long-text column.** bubbles/table
-  renders one line per row, so the line is injected into the already
-  rendered view: derive the visible window from the selection sentinel's
-  position (`firstVisible = cursor − sentinelLine`), never from mirrored
-  viewport scroll state; tint the line in its row's state hue without
-  bold; pad it to the table width so the row highlight spans both
-  lines; keep blink markers confined to the row's own State cell. Each
-  injected line costs real height, so the table's height budget hands
-  one row back per visible detail line (canopy's `resizeTableHeight`
-  re-measures the live window and damps down to fit). A measured
-  rejection motivates the rule (canopy#12): at 120 cells a third text
-  column next to Location and Model crushed all three to ~7 cells each
-  and still truncated the text, while a detail line shows it in full at
-  any width and costs nothing on rows without one.
+- Dashboards go further than the general rule: `--no-color` or `NO_COLOR` yields plain text with no ANSI styling, and meaning stays readable without color.
+- For `bubbles/table` v1, keep row values free of ANSI styles. Apply colors after table rendering through [loam](loam/README.md). Use its selection tag and style helpers instead of duplicating width or nested-reset workarounds.
+- Use [trellis](trellis/README.md) for allocation and resizing. Measure unfiltered labels so filters do not move borders. Keep compact fields readable and show a notice below the hard width minimum.
+- A border drag trades width only between its two neighboring columns. Freeze widths during the gesture. Keep desired proportions across polls and resizes; do not save widths to disk.
+- Put long optional row text on attached detail lines when columns would become unreadable. Include those lines in the height budget.
+- Derive dashboard observations from their owning sources. Retain missed observations only through an explicit stale-data policy; never let retention override fresh action checks.
+- Run all I/O in `tea.Cmd` commands. Never block `Update` or `View`, and avoid goroutines in `Update`. Delayed messages carry tokens or generations so stale timeouts and replies cannot overwrite newer state.
+- Read-only methods on state stored inside a Bubble Tea model use value receivers. Models are passed by value, so pointer-receiver reads cannot be called on type-asserted copies.
+- Refresh after successful mutations. Choose polling intervals from measured scan cost, not a universal fixed number.
 
-## Column layout and resizing (trellis)
+## Performance and verification
 
-- **Columns are ordered by what you're scanning for, left to right**:
-  canopy leads with urgency (State/Since: what needs you, and for how
-  long) and ends with identifiers (Kind, PID, deliberately narrow);
-  understory leads with identity and freshness (Repo/Branch/Created)
-  and puts state (Worktree/Merge) just before the path.
-- **One shared content-aware allocator fills the viewport** (`trellis.Allocate`). Content widths plus two padding cells per column equal the terminal width whenever the hard floors fit. Keep status, duration, resource, and numeric fields compact. Fund normal readable targets, then measured content, then weighted surplus. Canopy stretches Model and Location with equal surplus weights. Understory stretches Repo, Branch, and Path with weights 1:2:2. Weights apply only to surplus, not the whole viewport.
-- **Measure plain rendered labels from the full unfiltered row set.** Include shortened home paths, repeated repo labels, and branch mismatch suffixes. Use display cells, not bytes. Exclude ANSI, selection sentinels, and empty-state messages. Filter input must not move borders.
-- **Text shrinks before compact fields.** Normal targets can shrink to hard floors. Model content takes priority over a long path in Canopy. All columns remain visible. Below the combined hard minimum, show a terminal-too-narrow notice and keep the clipped fallback. Never report that the table fits there.
-- **Path cells truncate keeping the tail, not the head** (`…speed-up-ci/global-ops`, not `~/worktrees/hello…`). The head is the same prefix on nearly every row (`~/worktrees/…`); the tail is what identifies the row. bubbles/table's own truncation keeps the head, so the cell text is pre-truncated to the column's current width with `loam.TruncateHead` and rebuilt on poll, resize, and drag. Width allocation still measures the full untruncated label, and filters match the full path.
-- **A drag trades width between exactly the two columns the border
-  joins**; the table's total width never changes. No distant flex
-  column secretly absorbs a drag (an earlier trellis version worked
-  that way; it made one column's own border stop responding while every
-  other border resized that one column instead of its neighbor).
-- **Mouse preferences survive polls and terminal resizes** (`trellis.Preferences`). Capture a touched-column mask and integer desired proportions only after a changed drag motion. Keep untouched compact fields compact, preserve narrowed compact targets, and include widened compact fields in the stretch pool. Reproject and clamp hard floors without recapturing temporary narrow results. Widening restores the original proportions without drift.
-- **Automatic mode fits fresh content. Manual mode keeps chosen proportions.** After a drag, longer labels can truncate, even in an untouched stretch column. Do not silently move borders to fit new text. Preferences live in memory only. Restart returns to automatic mode. No reset key is added.
-- **Freeze geometry during a gesture.** Polls still update rows. Allocate on release or lost-button motion. A changed terminal width cancels the gesture before projection but keeps its latest preferences. Same-width and height-only updates leave widths and valid gestures unchanged.
-- **`trellis.Handle` needs the exact line index of the table's header
-  row** (`originY`): count every line your `View` emits before it,
-  including blank separators. An off-by-one makes every header drag
-  silently miss.
-- Mouse support requires `tea.WithMouseCellMotion()` on the program.
+- **Measure before optimizing.** Record the source revision, workload, scope, environment, and repeated timings. Report medians and ranges; keep live and simulated results separate.
+- **Remove unnecessary work first.** Batch external calls and reuse results within one invocation. Persistent caching needs an explicit freshness and invalidation policy.
+- **Keep concurrency bounded.** Choose threads, processes, or async from measurements and platform constraints. Do not assume more workers means faster execution.
+- **Test contracts, not private layout.** Cover arguments, output, state rules, and safety failures. Put external calls behind replaceable boundaries; do not require one injection mechanism in every language.
+- **Isolate tests and benchmarks.** Use temporary repos, config, registries, and app stubs. Never confirm destructive prompts against live work or open/focus the user's windows during automated checks.
+- **Run existing checks after changes.** Go projects run formatting, build, vet, and tests; use race checks for concurrent state. Python projects run their formatter, linter, type checker, and pytest through `uv`.
+- **Verify real interaction safely.** Use owned, bounded tmux sessions named `ag-<task>` for TUI smoke tests. Register each with `reap-strays --register-tmux`, and kill it when the task ends. Test on disposable fixtures. Passing unit tests does not prove live behavior or deployment.
 
-## State, polling, and async
+## Shared library maintenance
 
-- **Dashboard state is derived from shared, externally observable
-  sources** (`ps`, `lsof`, `wt list`, git), not owned. The one
-  exception (canopy's record of which `done` rows you've acknowledged)
-  syncs across instances through the filesystem
-  (`~/.pi/agent/canopy-status/acks/`), within one poll interval, with
-  no daemon and no locking.
-- **VS Code window identity comes from window titles, matched as
-  folder paths.** The dotfiles `window.title` setting
-  (`${rootPath}${separator}${activeRepositoryBranchName}`) puts the
-  opened folder's full path before the first ` — `, so one System
-  Events listing answers "is a window already open on this path?" by
-  exact path match, and focus is an `AXRaise` of the exact window whose
-  title matched. Identification and focus must stay bound to the same
-  window like this: any design that identifies one window and then asks
-  the `code` CLI to focus re-runs the CLI's own matching, and
-  `--reuse-window` hijacks the last-active window on any disagreement
-  (microsoft/vscode#121926; the per-window registry design died of
-  exactly that in dashkit#14). Never call `code --reuse-window`. The
-  title contract is load-bearing: it lives in the dotfiles, and the
-  branch component is never matched. And macOS culls the AX tree of a
-  backgrounded app, so on the act path an empty or matchless listing
-  while Code runs gets one activate-and-relist before a new window
-  opens (dashkit#9).
-- **Merge each fresh poll against the previous one** so a single missed
-  scan doesn't flicker rows away (canopy's `internal/registry`).
-- **Every delayed self-message carries a token.** Arming or resolving
-  increments the token; the tick is ignored unless it matches. This is
-  how the confirmation timeout (`confirm.Msg`) and the notification
-  auto-clear both avoid acting on stale state.
-- **Read-only methods on state stored inside a Bubble Tea model use
-  value receivers.** Models are passed around by value, and type
-  assertions back out of `tea.Model` produce non-addressable copies;
-  pointer-receiver reads are uncallable exactly where consumers need
-  them.
-- **A successful mutation refreshes immediately** rather than waiting
-  for the next poll.
-- **Poll intervals match the cost of the scan.** canopy polls every 2s
-  (`ps` is cheap); understory every 15s (`wt list` runs several git
-  subprocesses per worktree).
-
-## Safety rules
-
-- **Never signal a process without re-checking its identity first**:
-  pid plus lifetime from a fresh `ps` snapshot, so a recycled pid is
-  never signaled by mistake (canopy's `internal/kill`).
-- **Window matching fails safe.** Identity is a folder path parsed
-  from the window title, so there is nothing to be ambiguous about;
-  "inside the same worktree" for the work-tree-root match is decided
-  by `git rev-parse --show-toplevel`, and nested matches respect
-  path-element boundaries (`/wt-a` never matches `/wt-a-b`). (The old
-  basename-plus-branch title grammar needed more guards: branch
-  disambiguation, generic-branch bans, ambiguity refusals. The
-  full-path title contract deleted that class; the branch is never
-  matched, so phantom branches cannot form.)
-- **Fail loudly at startup, not silently later**: canopy checks for
-  macOS and exits with a clear error anywhere else; a failed process
-  scan shows a warning banner rather than looking identical to "no
-  sessions".
-- **Smoke tests never confirm a destructive prompt against live
-  sessions.** Only the cancel paths get exercised against the real
-  machine.
-
-## Testing
-
-- **External calls sit behind package-level function variables**
-  (`killProcess`, `openVSCode`, the scan functions), swapped out in
-  tests so keybind flows run without signaling real processes or
-  opening real windows.
-- **State machines are tested through `Update` with synthetic
-  messages**, including the unpleasant cases: stale tokens, swallowed
-  keys, `ctrl+c` from inside a modal, targets vanishing mid-prompt.
-- **TUIs are smoke-tested headlessly in tmux**: launch the real binary
-  in a detached session, send keys with `send-keys`, assert on
-  `capture-pane` output.
-- Every repo runs `go build`, `go vet`, `go test`, and `gofmt -l .`;
-  canopy adds `-race` and `golangci-lint` (`make check`).
-
-## Code organization and documentation style
-
-- **One Go package per concern** under `internal/`; `cmd/` is a thin
-  entry point (flags, version).
-- **Doc comments explain why, not what.** Package docs say what the
-  package is for and what deliberately isn't in it; each split-out
-  file's doc says why it's split out.
-- **READMEs document user-facing conventions and deliberate
-  omissions**; deeper design docs live in `docs/` (canopy's
-  `docs/agent-state-machine.md` is the model).
-- **Multi-step work is planned and tracked as GitHub issues**, not repo
-  markdown (understory#4, the consistency pass these conventions came
-  out of, is the canonical example).
-
-## Releasing dashkit
-
-- **Semver tags; consumers pin via go.mod** and bump deliberately (`go
-  get github.com/luiul/dashkit@vX.Y.Z`).
-- **Never move or delete a tag once it may have been fetched.**
-  proxy.golang.org caches versions immutably at first fetch, so a moved
-  tag permanently mismatches proxy versus direct fetches. Fixes ship as
-  a new patch version (v0.4.0 was fetched within minutes of tagging and
-  had to become v0.4.1).
-- **Package names**: garden metaphors for the primitives (loam,
-  trellis, mycelium), plainly descriptive when the package is exactly
-  what it says (confirm).
-- **Every package has its own README** with a "why this needs to exist"
-  section, and stays self-contained and independently importable.
+- Consumers pin released versions and update deliberately. Go consumers pin dashkit through `go.mod`.
+- Never move or delete a published tag. Ship a new version for a fix. Respect compatibility and document migration when behavior changes.
+- Keep packages independently importable, with clear API docs and examples. Name new packages plainly for what they do. Do not add metaphor names; the existing garden names are legacy, not a pattern to extend.
+- Add a shared rule only when it serves multiple tools. Conventions are not permission to add features or remove deliberate omissions.
 
 ## Deliberate omissions
 
-Things consciously not built, so nobody "fixes" their absence:
+These are choices, not gaps. Do not "fix" them without an explicit request.
 
-- **understory has no notion of "live"** (an agent currently working in
-  a worktree): that process-discovery machinery is canopy's, and
-  duplicating it would recouple two otherwise independent tools.
-- **canopy is same-machine, same-user, macOS-only**, and keyboard-only
-  (no row click; bubbles/table doesn't ship row-click handling).
-- **No third long-text column in canopy's table** (a Message/Session/
-  Detail column next to Location and Model): measured with real data
-  (canopy#12), three text columns crush each other to ~7 cells at
-  120-wide terminals and still truncate the text that matters. Long
-  free text lives on the attached detail line instead (see the loam
-  section above).
-- **Column widths are never saved to disk.** Manual proportions survive terminal resizes within the running app. Restart returns to automatic sizing.
-- **No new features to fix a convention problem.** The consistency pass
-  explicitly excluded adding features (a clipboard copy in canopy,
-  say); conventions first, features on their own merits.
+- Understory has no notion of a live agent. Canopy has no notion of git worktrees. Each owns its own discovery, and duplicating the other's would recouple the tools.
+- Canopy is same-machine, same-user, and macOS-only. Dashboards have no row click; the mouse only resizes columns.
+- No third long-text column in Canopy's table. Measured with real data in [canopy#12](https://github.com/luiul/canopy/issues/12), it crushed Location and Model and still truncated the text. Use an attached detail line.
+- Column widths are never saved to disk.
+- Convention work does not add features. Features are judged on their own merits.
